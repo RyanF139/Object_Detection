@@ -3,6 +3,7 @@ pipeline {
 
     environment {
         ENV_SOURCE = '/opt/config/object-detection/.env'
+        COMPOSE_DIR = 'docker'   // <-- ganti ini ke folder di repo yang berisi docker-compose.yml
     }
 
     stages {
@@ -13,13 +14,11 @@ pipeline {
             }
         }
 
-        // ❗ TIDAK PERLU checkout manual
-        // Jenkins otomatis clone dari SCM
-
         stage('Prepare Environment File') {
             steps {
                 sh '''
                 if [ -f "$ENV_SOURCE" ]; then
+                    echo "Copying .env to workspace..."
                     cp $ENV_SOURCE .env
                 else
                     echo ".env source not found!"
@@ -41,8 +40,14 @@ pipeline {
         stage('Stop Old Containers') {
             steps {
                 sh '''
-                docker compose down --remove-orphans || true
-                docker rm -f object-detection || true
+                cd $COMPOSE_DIR
+                if [ -f docker-compose.yml ]; then
+                    docker compose down --remove-orphans || true
+                    # Stop & remove old container by service name
+                    docker ps -aq --filter "name=object-detection" | xargs -r docker rm -f || true
+                else
+                    echo "docker-compose.yml not found in $COMPOSE_DIR"
+                fi
                 '''
             }
         }
@@ -50,7 +55,13 @@ pipeline {
         stage('Build Containers') {
             steps {
                 sh '''
-                docker compose build --no-cache
+                cd $COMPOSE_DIR
+                if [ -f docker-compose.yml ]; then
+                    docker compose build --no-cache
+                else
+                    echo "docker-compose.yml not found in $COMPOSE_DIR"
+                    exit 1
+                fi
                 '''
             }
         }
@@ -58,6 +69,7 @@ pipeline {
         stage('Run Containers') {
             steps {
                 sh '''
+                cd $COMPOSE_DIR
                 docker compose up -d
                 '''
             }
