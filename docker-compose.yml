@@ -1,0 +1,14 @@
+version: "3.9"
+
+services:
+
+  object-detection:
+    build: .
+    container_name: obect-detection
+    command: python -u main2.py
+    env_file:
+      - .env
+    volumes:
+      - ./image_detection:/app/image_detection
+    network_mode: host
+    restart: unless-stopped
