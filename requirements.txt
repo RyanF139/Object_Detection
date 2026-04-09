@@ -1,9 +1,5 @@
-opencv-python==4.9.0.80
-numpy==1.26.4
-requests==2.31.0
-python-dotenv==1.0.1
-psutil==5.9.8
-gunicorn
-yt-dlp
-boto3
-tzdata
+opencv-python
+numpy
+requests
+onnxruntime
+python-dotenv
