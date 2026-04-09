@@ -2,7 +2,7 @@ pipeline {
 agent { label 'built-in' }
 
 environment {
-    REPO_URL   = 'https://github.com/RyanF139/Object_Detection.git'
+    REPO_URL   = 'https://github.com/RyanF139/Object-Detection.git'
     ENV_SOURCE = '/opt/config/object-detection/.env'
 }
 
