@@ -2,15 +2,17 @@ pipeline {
     agent { label 'built-in' }
 
     environment {
+        REPO_URL   = 'https://github.com/RyanF139/Object_Detection.git'
         ENV_SOURCE = '/opt/config/object-detection/.env'
-        COMPOSE_DIR = '.'   // root workspace, karena docker-compose.yml ada di root
     }
 
     stages {
 
-        stage('Prepare Workspace') {
+        stage('Checkout') {
             steps {
-                cleanWs()
+                git branch: 'main',
+                    url: "${REPO_URL}",
+                    credentialsId: '001'
             }
         }
 
@@ -18,10 +20,10 @@ pipeline {
             steps {
                 sh '''
                 if [ -f "$ENV_SOURCE" ]; then
-                    echo "Copying .env to workspace..."
                     cp $ENV_SOURCE .env
+                    echo ".env copied to workspace"
                 else
-                    echo ".env source not found!"
+                    echo ".env file not found!"
                     exit 1
                 fi
                 '''
@@ -40,15 +42,9 @@ pipeline {
         stage('Stop Old Containers') {
             steps {
                 sh '''
-                cd $COMPOSE_DIR
-                if [ -f docker-compose.yml ]; then
-                    echo "Stopping old containers..."
-                    docker compose down --remove-orphans || true
-                    docker ps -aq --filter "name=object-detection" | xargs -r docker rm -f || true
-                else
-                    echo "docker-compose.yml not found in $COMPOSE_DIR"
-                    exit 1
-                fi
+                docker stop object-detection || true
+                docker rm object-detection || true
+                docker compose down --remove-orphans || true
                 '''
             }
         }
@@ -56,8 +52,6 @@ pipeline {
         stage('Build Containers') {
             steps {
                 sh '''
-                cd $COMPOSE_DIR
-                echo "Building containers..."
                 docker compose build --no-cache
                 '''
             }
@@ -66,8 +60,6 @@ pipeline {
         stage('Run Containers') {
             steps {
                 sh '''
-                cd $COMPOSE_DIR
-                echo "Running containers..."
                 docker compose up -d
                 '''
             }
@@ -85,10 +77,10 @@ pipeline {
 
     post {
         success {
-            echo 'Deploy sukses 🚀'
+            echo 'Deploy Object Detection sukses 🚀'
         }
         failure {
-            echo 'Deploy gagal ❌'
+            echo 'Deploy Object Detection gagal ❌'
         }
         always {
             echo 'Pipeline completed.'
