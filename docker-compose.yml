@@ -4,7 +4,7 @@ services:
 
   object-detection:
     build: .
-    container_name: obect-detection
+    container_name: object-detection
     command: python -u main2.py
     env_file:
       - .env
