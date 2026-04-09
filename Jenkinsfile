@@ -3,7 +3,7 @@ pipeline {
 
     environment {
         ENV_SOURCE = '/opt/config/object-detection/.env'
-        COMPOSE_DIR = 'docker'   // <-- ganti ini ke folder di repo yang berisi docker-compose.yml
+        COMPOSE_DIR = '.'   // root workspace, karena docker-compose.yml ada di root
     }
 
     stages {
@@ -42,11 +42,12 @@ pipeline {
                 sh '''
                 cd $COMPOSE_DIR
                 if [ -f docker-compose.yml ]; then
+                    echo "Stopping old containers..."
                     docker compose down --remove-orphans || true
-                    # Stop & remove old container by service name
                     docker ps -aq --filter "name=object-detection" | xargs -r docker rm -f || true
                 else
                     echo "docker-compose.yml not found in $COMPOSE_DIR"
+                    exit 1
                 fi
                 '''
             }
@@ -56,12 +57,8 @@ pipeline {
             steps {
                 sh '''
                 cd $COMPOSE_DIR
-                if [ -f docker-compose.yml ]; then
-                    docker compose build --no-cache
-                else
-                    echo "docker-compose.yml not found in $COMPOSE_DIR"
-                    exit 1
-                fi
+                echo "Building containers..."
+                docker compose build --no-cache
                 '''
             }
         }
@@ -70,6 +67,7 @@ pipeline {
             steps {
                 sh '''
                 cd $COMPOSE_DIR
+                echo "Running containers..."
                 docker compose up -d
                 '''
             }
