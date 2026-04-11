@@ -5,7 +5,7 @@ services:
   object-detection:
     build: .
     container_name: object-detection
-    command: python -u main2.py
+    command: python -u main3.py
     env_file:
       - .env
     volumes:
