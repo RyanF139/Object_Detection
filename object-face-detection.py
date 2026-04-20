@@ -28,6 +28,11 @@ CAMERA_REFRESH_INTERVAL = int(os.getenv("CAMERA_REFRESH_INTERVAL", 10))
 
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 
+# --- Device ---
+# "cuda" untuk GPU, "cpu" untuk paksa CPU
+DEVICE         = os.getenv("DEVICE", "cuda").lower()
+CUDA_DEVICE_ID = int(os.getenv("CUDA_DEVICE_ID", 0))
+
 # --- Vehicle detection thresholds ---
 CONF_THRESHOLD = float(os.getenv("CONF_THRESHOLD", 0.30))
 IOU_THRESHOLD  = float(os.getenv("IOU_THRESHOLD",  0.40))
@@ -187,22 +192,38 @@ _session_lock = Lock()
 
 def build_shared_session() -> tuple[ort.InferenceSession, str]:
     opts = ort.SessionOptions()
-    opts.intra_op_num_threads          = ONNX_INTRA_THREADS
-    opts.inter_op_num_threads          = ONNX_INTER_THREADS
-    opts.execution_mode                = ort.ExecutionMode.ORT_SEQUENTIAL
-    opts.graph_optimization_level      = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+    opts.intra_op_num_threads     = ONNX_INTRA_THREADS
+    opts.inter_op_num_threads     = ONNX_INTER_THREADS
+    opts.execution_mode           = ort.ExecutionMode.ORT_SEQUENTIAL
+    opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
 
-    providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
+    if DEVICE == "cuda":
+        providers = [
+            (
+                "CUDAExecutionProvider",
+                {"device_id": CUDA_DEVICE_ID},
+            ),
+            "CPUExecutionProvider",
+        ]
+    else:
+        providers = ["CPUExecutionProvider"]
+
     try:
         sess = ort.InferenceSession(MODEL_PATH, providers=providers, sess_options=opts)
-    except Exception:
-        sess = ort.InferenceSession(MODEL_PATH, providers=["CPUExecutionProvider"], sess_options=opts)
+    except Exception as e:
+        print(f"[ONNX] Provider gagal ({e}), fallback ke CPU")
+        sess = ort.InferenceSession(
+            MODEL_PATH,
+            providers=["CPUExecutionProvider"],
+            sess_options=opts,
+        )
 
     input_name = sess.get_inputs()[0].name
     dummy = np.zeros((1, 3, IMG_SIZE, IMG_SIZE), dtype=np.float32)
     sess.run(None, {input_name: dummy})
 
-    print(f"[ONNX SHARED] Session created | provider={sess.get_providers()}")
+    active_provider = sess.get_providers()[0]
+    print(f"[ONNX SHARED] Session created | provider={active_provider} | device_id={CUDA_DEVICE_ID}")
     print(f"[ONNX SHARED] intra={ONNX_INTRA_THREADS} | inter={ONNX_INTER_THREADS}")
     return sess, input_name
 
@@ -215,7 +236,7 @@ def get_shared_session() -> tuple[ort.InferenceSession, str]:
     return _shared_session, _shared_input_name
 
 
-print("[STARTUP] Initializing shared ONNX session...")
+print(f"[STARTUP] Initializing shared ONNX session | device={DEVICE.upper()}...")
 get_shared_session()
 print("[STARTUP] Shared ONNX session ready")
 
@@ -229,17 +250,37 @@ FACE_INFER_WORKERS = int(os.getenv("FACE_INFER_WORKERS", 2))
 
 
 def build_shared_face_detector() -> cv2.FaceDetectorYN:
-    det = cv2.FaceDetectorYN_create(
-        FACE_MODEL_PATH, "", (640, 640),
-        score_threshold=SCORE_THRESHOLD,
-        nms_threshold=0.4,
-        top_k=5000,
-    )
-    # Warmup
-    dummy = np.zeros((640, 640, 3), dtype=np.uint8)
-    det.setInputSize((640, 640))
-    det.detect(dummy)
-    print(f"[YUNET SHARED] Session created | model={FACE_MODEL_PATH}")
+    backend_id = cv2.dnn.DNN_BACKEND_CUDA if DEVICE == "cuda" else cv2.dnn.DNN_BACKEND_OPENCV
+    target_id  = cv2.dnn.DNN_TARGET_CUDA  if DEVICE == "cuda" else cv2.dnn.DNN_TARGET_CPU
+
+    try:
+        det = cv2.FaceDetectorYN_create(
+            FACE_MODEL_PATH, "", (640, 640),
+            score_threshold=SCORE_THRESHOLD,
+            nms_threshold=0.4,
+            top_k=5000,
+            backend_id=backend_id,
+            target_id=target_id,
+        )
+        # Warmup
+        dummy = np.zeros((640, 640, 3), dtype=np.uint8)
+        det.setInputSize((640, 640))
+        det.detect(dummy)
+        print(f"[YUNET SHARED] Session created | device={DEVICE.upper()} | model={FACE_MODEL_PATH}")
+    except Exception as e:
+        print(f"[YUNET] GPU gagal ({e}), fallback ke CPU")
+        det = cv2.FaceDetectorYN_create(
+            FACE_MODEL_PATH, "", (640, 640),
+            score_threshold=SCORE_THRESHOLD,
+            nms_threshold=0.4,
+            top_k=5000,
+        )
+        # Warmup
+        dummy = np.zeros((640, 640, 3), dtype=np.uint8)
+        det.setInputSize((640, 640))
+        det.detect(dummy)
+        print(f"[YUNET SHARED] Fallback CPU | model={FACE_MODEL_PATH}")
+
     return det
 
 
@@ -251,7 +292,7 @@ def get_shared_face_detector() -> cv2.FaceDetectorYN:
     return _shared_face_detector
 
 
-print("[STARTUP] Initializing shared YuNet session...")
+print(f"[STARTUP] Initializing shared YuNet session | device={DEVICE.upper()}...")
 get_shared_face_detector()
 print("[STARTUP] Shared YuNet session ready")
 
@@ -275,17 +316,31 @@ def face_inference_worker(worker_id: int):
     - Hanya FACE_INFER_WORKERS instance (default 2), bukan N kamera instance
     - Camera thread tidak pernah block di detect()
     """
-    # Tiap worker punya detector sendiri supaya setInputSize() aman
-    det = cv2.FaceDetectorYN_create(
-        FACE_MODEL_PATH, "", (640, 640),
-        score_threshold=SCORE_THRESHOLD,
-        nms_threshold=0.4,
-        top_k=5000,
-    )
+    backend_id = cv2.dnn.DNN_BACKEND_CUDA if DEVICE == "cuda" else cv2.dnn.DNN_BACKEND_OPENCV
+    target_id  = cv2.dnn.DNN_TARGET_CUDA  if DEVICE == "cuda" else cv2.dnn.DNN_TARGET_CPU
+
+    try:
+        det = cv2.FaceDetectorYN_create(
+            FACE_MODEL_PATH, "", (640, 640),
+            score_threshold=SCORE_THRESHOLD,
+            nms_threshold=0.4,
+            top_k=5000,
+            backend_id=backend_id,
+            target_id=target_id,
+        )
+    except Exception as e:
+        print(f"[FACE WORKER {worker_id}] GPU gagal ({e}), fallback CPU")
+        det = cv2.FaceDetectorYN_create(
+            FACE_MODEL_PATH, "", (640, 640),
+            score_threshold=SCORE_THRESHOLD,
+            nms_threshold=0.4,
+            top_k=5000,
+        )
+
     dummy = np.zeros((640, 640, 3), dtype=np.uint8)
     det.setInputSize((640, 640))
     det.detect(dummy)
-    print(f"[FACE WORKER {worker_id}] Started")
+    print(f"[FACE WORKER {worker_id}] Started | device={DEVICE.upper()}")
 
     while True:
         try:
@@ -321,7 +376,7 @@ _INFER_WORKERS = int(os.getenv("INFER_WORKERS", 2))
 
 def inference_worker(worker_id: int):
     sess, input_name = get_shared_session()
-    print(f"[INFER WORKER {worker_id}] Started")
+    print(f"[INFER WORKER {worker_id}] Started | device={DEVICE.upper()}")
     while True:
         try:
             item = _infer_input_queue.get(timeout=1.0)
@@ -1479,6 +1534,7 @@ def print_camera_status():
     print(f"Dead              : {dead}")
     print(f"Save Img Vehicle  : {save_veh_on}/{total} cameras ON")
     print(f"Save Img Face     : {save_face_on}/{total} cameras ON")
+    print(f"Device            : {DEVICE.upper()} (device_id={CUDA_DEVICE_ID})")
     print(f"Vehicle Wbhk Queue: {webhook_queue.qsize()}")
     print(f"Face Wbhk Queue   : {face_webhook_queue.qsize()}")
     print(f"Vehicle Infer Q   : {_infer_input_queue.qsize()}")
