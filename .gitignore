@@ -4,3 +4,4 @@ __pycache__
 .env.bac
 image_detection
 sample_videos
+image_face
