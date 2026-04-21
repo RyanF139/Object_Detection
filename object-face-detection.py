@@ -19,78 +19,154 @@ load_dotenv()
 
 # ================= ENV =================
 
-SERVICE_ID   = os.getenv("SERVICE_ID", "capture_100")
-MODEL_PATH   = os.getenv("MODEL_PATH", "yolov8s.onnx")          # Vehicle ONNX model
-FACE_MODEL_PATH = os.getenv("FACE_MODEL_PATH", "face_detection_yunet_2023mar.onnx")
+SERVICE_ID      = os.getenv("SERVICE_ID", "capture_100")
+MODEL_PATH      = os.getenv("MODEL_PATH", "models/yolov8s.onnx")
+FACE_MODEL_PATH = os.getenv("FACE_MODEL_PATH", "models/face_detection_yunet_2023mar.onnx")
 
 ENDPOINT_URL            = os.getenv("CCTV_ENDPOINT", "http://localhost:8000/api/webhook/cctv/")
 CAMERA_REFRESH_INTERVAL = int(os.getenv("CAMERA_REFRESH_INTERVAL", 10))
+WEBHOOK_URL             = os.getenv("WEBHOOK_URL")
 
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")
-
-# --- Device ---
-# "cuda" untuk GPU, "cpu" untuk paksa CPU
-DEVICE         = os.getenv("DEVICE", "cuda").lower()
+_DEVICE_ENV    = os.getenv("DEVICE", "cuda").lower()
 CUDA_DEVICE_ID = int(os.getenv("CUDA_DEVICE_ID", 0))
 
-# --- Vehicle detection thresholds ---
-CONF_THRESHOLD = float(os.getenv("CONF_THRESHOLD", 0.30))
-IOU_THRESHOLD  = float(os.getenv("IOU_THRESHOLD",  0.40))
+# ================= RTSP OPTIONS =================
+# fflags=discardcorrupt → buang frame corrupt SEBELUM di-decode (hemat CPU)
+# nobuffer              → kurangi latency, tidak tumpuk frame di buffer
+# low_delay             → prioritaskan frame terbaru
+os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = (
+    "rtsp_transport;tcp|"
+    "fflags;nobuffer+discardcorrupt|"
+    "flags;low_delay|"
+    "buffer_size;2048000|"
+    "max_delay;100000"
+)
+os.environ["OPENCV_LOG_LEVEL"] = "SILENT"   # suppress FFmpeg decode error log
 
-# --- Face detection thresholds ---
+
+# ================= CUDA CHECK =================
+
+def _check_onnxruntime_cuda() -> bool:
+    if "CUDAExecutionProvider" not in ort.get_available_providers():
+        print("[CUDA CHECK] onnxruntime: CUDAExecutionProvider tidak tersedia")
+        return False
+    print(f"[CUDA CHECK] onnxruntime: CUDAExecutionProvider OK (device_id={CUDA_DEVICE_ID})")
+    return True
+
+
+def _check_opencv_cuda() -> bool:
+    if not hasattr(cv2, "cuda"):
+        print("[CUDA CHECK] OpenCV: dikompilasi tanpa CUDA (tidak ada cv2.cuda module)")
+        print("             → Build OpenCV dari source dengan -DWITH_CUDA=ON")
+        return False
+
+    try:
+        gpu_count = cv2.cuda.getCudaEnabledDeviceCount()
+        if gpu_count <= 0:
+            print("[CUDA CHECK] OpenCV: tidak ada GPU CUDA terdeteksi")
+            return False
+        if CUDA_DEVICE_ID >= gpu_count:
+            print(f"[CUDA CHECK] OpenCV: CUDA_DEVICE_ID={CUDA_DEVICE_ID} >= gpu_count={gpu_count}")
+            return False
+        print(f"[CUDA CHECK] OpenCV: {gpu_count} GPU terdeteksi OK")
+    except Exception as e:
+        print(f"[CUDA CHECK] OpenCV cv2.cuda error: {e}")
+        return False
+
+    try:
+        dummy_det = cv2.FaceDetectorYN_create(
+            FACE_MODEL_PATH, "", (32, 32),
+            score_threshold=0.5, nms_threshold=0.4, top_k=1,
+            backend_id=cv2.dnn.DNN_BACKEND_CUDA,
+            target_id=cv2.dnn.DNN_TARGET_CUDA,
+        )
+        dummy_img = np.zeros((32, 32, 3), dtype=np.uint8)
+        dummy_det.setInputSize((32, 32))
+        dummy_det.detect(dummy_img)
+        del dummy_det
+        print("[CUDA CHECK] OpenCV DNN CUDA backend: OK")
+        return True
+    except Exception as e:
+        print(f"[CUDA CHECK] OpenCV DNN CUDA backend gagal: {e}")
+        print("             → Pastikan OpenCV di-build dengan -DOPENCV_DNN_CUDA=ON dan -DWITH_CUDNN=ON")
+        return False
+
+
+def _resolve_device() -> str:
+    if _DEVICE_ENV != "cuda":
+        print("[DEVICE] Mode: CPU (dipaksa lewat .env DEVICE=cpu)")
+        return "cpu"
+
+    print("[DEVICE] Memeriksa ketersediaan CUDA...")
+    ort_ok = _check_onnxruntime_cuda()
+    ocv_ok = _check_opencv_cuda()
+
+    if ort_ok and ocv_ok:
+        print(f"[DEVICE] Mode: FULL GPU — onnxruntime CUDA + OpenCV DNN CUDA (device_id={CUDA_DEVICE_ID})")
+        return "cuda"
+    elif ort_ok and not ocv_ok:
+        print("[DEVICE] Mode: PARTIAL GPU — onnxruntime CUDA OK, OpenCV CUDA GAGAL")
+        print("         Vehicle inference → GPU | Face inference → CPU")
+        return "cuda_partial"
+    else:
+        print("[DEVICE] Mode: CPU (semua CUDA gagal, fallback otomatis)")
+        return "cpu"
+
+
+DEVICE = _resolve_device()
+
+_ORT_USE_CUDA = DEVICE in ("cuda", "cuda_partial")
+_OCV_USE_CUDA = DEVICE == "cuda"
+
+# ================= THRESHOLDS =================
+
+CONF_THRESHOLD   = float(os.getenv("CONF_THRESHOLD",   0.30))
+IOU_THRESHOLD    = float(os.getenv("IOU_THRESHOLD",    0.40))
 SCORE_THRESHOLD  = float(os.getenv("SCORE_THRESHOLD",  0.35))
 BLUR_THRESHOLD   = float(os.getenv("BLUR_THRESHOLD",   0))
 MIN_SIZE_CAPTURE = int(os.getenv("MIN_SIZE_CAPTURE",   0))
 MAX_FACE_SIZE    = int(os.getenv("MAX_FACE_SIZE",       800))
 
-# --- Anti-spam face ---
 FACE_COOLDOWN       = float(os.getenv("FACE_COOLDOWN",       8))
 FACE_MOVE_THRESHOLD = int(os.getenv("FACE_MOVE_THRESHOLD",   80))
 FACE_BUCKET_SIZE    = int(os.getenv("FACE_BUCKET_SIZE",       220))
 
-# --- Save / storage ---
 SAVE_FOLDER      = os.getenv("SAVE_FOLDER",   "image_detection")
 FACE_FOLDER_BASE = os.getenv("FACE_FOLDER",   "image_face")
 MAX_IMAGES       = int(os.getenv("MAX_IMAGES", 1000))
-CROP_PADDING     = float(os.getenv("CROP_PADDING", 0.20))
+CROP_PADDING      = float(os.getenv("CROP_PADDING",      0.20))
 FACE_CROP_PADDING = float(os.getenv("FACE_CROP_PADDING", 0.35))
 
-# --- Save image to disk (true/false) ---
-# Jika false: image di-encode tetap untuk dikirim ke webhook, tapi TIDAK ditulis ke disk
 SAVE_IMAGE         = os.getenv("SAVE_IMAGE",         "true").lower() == "true"
-SAVE_IMAGE_VEHICLE = os.getenv("SAVE_IMAGE_VEHICLE", "true").lower() == "true"  # override khusus vehicle
-SAVE_IMAGE_FACE    = os.getenv("SAVE_IMAGE_FACE",    "true").lower() == "true"  # override khusus face
+SAVE_IMAGE_VEHICLE = os.getenv("SAVE_IMAGE_VEHICLE", "true").lower() == "true"
+SAVE_IMAGE_FACE    = os.getenv("SAVE_IMAGE_FACE",    "true").lower() == "true"
 
-# --- Save / send resolution ---
-SAVE_MAX_WIDTH = int(os.getenv("SAVE_MAX_WIDTH", 0))
+SAVE_MAX_WIDTH   = int(os.getenv("SAVE_MAX_WIDTH",  0))
+TARGET_MAX_WIDTH = int(os.getenv("RESIZE_WIDTH",    640))
+IMG_SIZE         = int(os.getenv("IMG_SIZE",        320))
 
-# --- Resize untuk inferensi & display ---
-TARGET_MAX_WIDTH = int(os.getenv("RESIZE_WIDTH", 640))
-IMG_SIZE         = int(os.getenv("IMG_SIZE", 320))
-
-# --- FPS / idle ---
-FRAME_FPS    = int(os.getenv("FRAME_FPS", 12))
-IDLE_FPS     = int(os.getenv("IDLE_FPS",  3))
+FRAME_FPS    = int(os.getenv("FRAME_FPS",    12))
+IDLE_FPS     = int(os.getenv("IDLE_FPS",      3))
 IDLE_TIMEOUT = int(os.getenv("IDLE_TIMEOUT", 10))
 
-# --- Tracker ---
 TRACK_MAX_DIST = int(os.getenv("TRACK_MAX_DIST", 80))
 TRACK_MAX_MISS = int(os.getenv("TRACK_MAX_MISS", 20))
 TRACK_MOVE_THR = int(os.getenv("TRACK_MOVE_THR", 40))
 
-# --- Display ---
-ENABLE_VIEW    = os.getenv("ENABLE_VIEW", "true").lower() == "true"
+ENABLE_VIEW    = os.getenv("ENABLE_VIEW",    "true").lower() == "true"
 DISPLAY_WIDTH  = int(os.getenv("DISPLAY_WIDTH",  1200))
 DISPLAY_HEIGHT = int(os.getenv("DISPLAY_HEIGHT",  800))
 
-# --- Debug ---
-DEBUG_MODE      = os.getenv("DEBUG_MODE", "false").lower() == "true"
+DEBUG_MODE      = os.getenv("DEBUG_MODE",      "false").lower() == "true"
 DEBUG_VIDEO_DIR = os.getenv("DEBUG_VIDEO_DIR", "./sample_videos")
 
-# --- ONNX thread config ---
 ONNX_INTRA_THREADS = int(os.getenv("ONNX_INTRA_THREADS", 4))
 ONNX_INTER_THREADS = int(os.getenv("ONNX_INTER_THREADS", 2))
 FACE_INFER_WORKERS = int(os.getenv("FACE_INFER_WORKERS", 2))
+_INFER_WORKERS     = int(os.getenv("INFER_WORKERS",      2))
+
+# Jumlah frame dibuang dari buffer sebelum retrieve (ambil frame terbaru)
+GRAB_SKIP_COUNT = int(os.getenv("GRAB_SKIP_COUNT", 3))
 
 # ================= CLASS CONFIG =================
 
@@ -107,52 +183,44 @@ COCO_CLASSES = [
     "book","clock","vase","scissors","teddy bear","hair drier","toothbrush"
 ]
 
-DEFAULT_ROI_POLYGON = np.array([
-    [0, 0], [640, 0], [640, 360], [0, 360]
-], dtype=np.int32)
-
-WIDTH_LINE = 1
-
-DEFAULT_LINE            = [[0, 320], [640, 320]]
-DEFAULT_LINE_IN_DIR     = "A"
+DEFAULT_ROI_POLYGON = np.array([[0,0],[640,0],[640,360],[0,360]], dtype=np.int32)
+WIDTH_LINE           = 1
+DEFAULT_LINE         = [[0, 320], [640, 320]]
+DEFAULT_LINE_IN_DIR  = "A"
 DEFAULT_LINE_ENABLED    = True
 DEFAULT_VEHICLE_ENABLED = os.getenv("VEHICLE_ENABLED", "true").lower() == "true"
 DEFAULT_FACE_ENABLED    = os.getenv("FACE_ENABLED",    "true").lower() == "true"
-
-# Efektif per-kamera: SAVE_IMAGE_VEHICLE/FACE bisa di-override lewat API field
-# Logika: save_disk = SAVE_IMAGE AND SAVE_IMAGE_VEHICLE (atau FACE)
 DEFAULT_SAVE_IMAGE_VEHICLE = SAVE_IMAGE and SAVE_IMAGE_VEHICLE
 DEFAULT_SAVE_IMAGE_FACE    = SAVE_IMAGE and SAVE_IMAGE_FACE
 
-# NOTE: "person" dihapus — diganti face detection terpisah
 CLASS_CONFIG = {
     "car": {
-        "conf":     float(os.getenv("CAR_CONF", 0.40)),
-        "color":    tuple(map(int, os.getenv("CAR_COLOR", "255,0,0").split(","))),
-        "min_size": int(os.getenv("CAR_MIN_SIZE", 5000)),
-        "max_size": int(os.getenv("CAR_MAX_SIZE", 200000)),
-        "cooldown": int(os.getenv("CAR_COOLDOWN", 10)),
+        "conf":     float(os.getenv("CAR_CONF",      0.40)),
+        "color":    tuple(map(int, os.getenv("CAR_COLOR",    "255,0,0").split(","))),
+        "min_size": int(os.getenv("CAR_MIN_SIZE",    5000)),
+        "max_size": int(os.getenv("CAR_MAX_SIZE",    200000)),
+        "cooldown": int(os.getenv("CAR_COOLDOWN",    10)),
     },
     "bus": {
-        "conf":     float(os.getenv("BUS_CONF", 0.40)),
-        "color":    tuple(map(int, os.getenv("BUS_COLOR", "255,165,0").split(","))),
-        "min_size": int(os.getenv("BUS_MIN_SIZE", 50000)),
-        "max_size": int(os.getenv("BUS_MAX_SIZE", 200000)),
-        "cooldown": int(os.getenv("BUS_COOLDOWN", 10)),
+        "conf":     float(os.getenv("BUS_CONF",      0.40)),
+        "color":    tuple(map(int, os.getenv("BUS_COLOR",    "255,165,0").split(","))),
+        "min_size": int(os.getenv("BUS_MIN_SIZE",    50000)),
+        "max_size": int(os.getenv("BUS_MAX_SIZE",    200000)),
+        "cooldown": int(os.getenv("BUS_COOLDOWN",    10)),
     },
     "truck": {
-        "conf":     float(os.getenv("TRUCK_CONF", 0.40)),
-        "color":    tuple(map(int, os.getenv("TRUCK_COLOR", "128,128,128").split(","))),
-        "min_size": int(os.getenv("TRUCK_MIN_SIZE", 100000)),
-        "max_size": int(os.getenv("TRUCK_MAX_SIZE", 300000)),
-        "cooldown": int(os.getenv("TRUCK_COOLDOWN", 10)),
+        "conf":     float(os.getenv("TRUCK_CONF",    0.40)),
+        "color":    tuple(map(int, os.getenv("TRUCK_COLOR",  "128,128,128").split(","))),
+        "min_size": int(os.getenv("TRUCK_MIN_SIZE",  100000)),
+        "max_size": int(os.getenv("TRUCK_MAX_SIZE",  300000)),
+        "cooldown": int(os.getenv("TRUCK_COOLDOWN",  10)),
     },
     "motorcycle": {
-        "conf":     float(os.getenv("MOTORCYCLE_CONF", 0.35)),
+        "conf":     float(os.getenv("MOTORCYCLE_CONF",    0.35)),
         "color":    tuple(map(int, os.getenv("MOTORCYCLE_COLOR", "0,255,255").split(","))),
-        "min_size": int(os.getenv("MOTORCYCLE_MIN_SIZE", 1000)),
-        "max_size": int(os.getenv("MOTORCYCLE_MAX_SIZE", 90000)),
-        "cooldown": int(os.getenv("MOTORCYCLE_COOLDOWN", 10)),
+        "min_size": int(os.getenv("MOTORCYCLE_MIN_SIZE",  1000)),
+        "max_size": int(os.getenv("MOTORCYCLE_MAX_SIZE",  90000)),
+        "cooldown": int(os.getenv("MOTORCYCLE_COOLDOWN",  10)),
     },
 }
 
@@ -161,74 +229,56 @@ ALLOWED_CLASSES = set(CLASS_CONFIG.keys())
 
 # ================= FOLDERS =================
 
-DETECT_FOLDER    = os.path.join(SAVE_FOLDER, "crop")
-FRAME_FOLDER_VEH = os.path.join(SAVE_FOLDER, "frame")
-FACE_CROP_FOLDER = os.path.join(FACE_FOLDER_BASE, "face")
+DETECT_FOLDER     = os.path.join(SAVE_FOLDER,      "crop")
+FRAME_FOLDER_VEH  = os.path.join(SAVE_FOLDER,      "frame")
+FACE_CROP_FOLDER  = os.path.join(FACE_FOLDER_BASE, "face")
 FACE_FRAME_FOLDER = os.path.join(FACE_FOLDER_BASE, "frame")
 
 for _d in [DETECT_FOLDER, FRAME_FOLDER_VEH, FACE_CROP_FOLDER, FACE_FRAME_FOLDER]:
     os.makedirs(_d, exist_ok=True)
-
-os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp"
 
 # ================= GLOBALS =================
 
 JAKARTA_TZ     = timezone(timedelta(hours=7))
 active_cameras = {}
 camera_lock    = Lock()
-
 preview_frames = {}
 preview_lock   = Lock()
 
-webhook_queue      = Queue(maxsize=1000)   # vehicle + face events
-face_webhook_queue = Queue(maxsize=1000)   # dedicated face webhook queue
+webhook_queue      = Queue(maxsize=1000)
+face_webhook_queue = Queue(maxsize=1000)
 
-# ================= SHARED ONNX SESSION (vehicle) =================
+# ================= SHARED ONNX SESSION =================
 
-_shared_session: ort.InferenceSession | None = None
-_shared_input_name: str | None = None
-_session_lock = Lock()
+_shared_session    = None
+_shared_input_name = None
+_session_lock      = Lock()
 
 
-def build_shared_session() -> tuple[ort.InferenceSession, str]:
+def build_shared_session():
     opts = ort.SessionOptions()
     opts.intra_op_num_threads     = ONNX_INTRA_THREADS
     opts.inter_op_num_threads     = ONNX_INTER_THREADS
     opts.execution_mode           = ort.ExecutionMode.ORT_SEQUENTIAL
     opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
 
-    if DEVICE == "cuda":
-        providers = [
-            (
-                "CUDAExecutionProvider",
-                {"device_id": CUDA_DEVICE_ID},
-            ),
-            "CPUExecutionProvider",
-        ]
-    else:
-        providers = ["CPUExecutionProvider"]
+    providers = (
+        [("CUDAExecutionProvider", {"device_id": CUDA_DEVICE_ID}), "CPUExecutionProvider"]
+        if _ORT_USE_CUDA else ["CPUExecutionProvider"]
+    )
 
-    try:
-        sess = ort.InferenceSession(MODEL_PATH, providers=providers, sess_options=opts)
-    except Exception as e:
-        print(f"[ONNX] Provider gagal ({e}), fallback ke CPU")
-        sess = ort.InferenceSession(
-            MODEL_PATH,
-            providers=["CPUExecutionProvider"],
-            sess_options=opts,
-        )
-
+    sess       = ort.InferenceSession(MODEL_PATH, providers=providers, sess_options=opts)
     input_name = sess.get_inputs()[0].name
+
     dummy = np.zeros((1, 3, IMG_SIZE, IMG_SIZE), dtype=np.float32)
     sess.run(None, {input_name: dummy})
 
-    active_provider = sess.get_providers()[0]
-    print(f"[ONNX SHARED] Session created | provider={active_provider} | device_id={CUDA_DEVICE_ID}")
+    print(f"[ONNX SHARED] provider={sess.get_providers()[0]} | device_id={CUDA_DEVICE_ID}")
     print(f"[ONNX SHARED] intra={ONNX_INTRA_THREADS} | inter={ONNX_INTER_THREADS}")
     return sess, input_name
 
 
-def get_shared_session() -> tuple[ort.InferenceSession, str]:
+def get_shared_session():
     global _shared_session, _shared_input_name
     with _session_lock:
         if _shared_session is None:
@@ -236,55 +286,34 @@ def get_shared_session() -> tuple[ort.InferenceSession, str]:
     return _shared_session, _shared_input_name
 
 
-print(f"[STARTUP] Initializing shared ONNX session | device={DEVICE.upper()}...")
+print(f"[STARTUP] Inisialisasi ONNX session | device={DEVICE.upper()}...")
 get_shared_session()
-print("[STARTUP] Shared ONNX session ready")
+print("[STARTUP] ONNX session siap")
 
-# ================= SHARED YUNET SESSION (face) =================
-# Sama seperti ONNX vehicle — satu instance dipakai semua kamera
-# cv2.FaceDetectorYN thread-safe untuk concurrent detect()
+# ================= SHARED YUNET SESSION =================
 
-_shared_face_detector: cv2.FaceDetectorYN | None = None
-_face_session_lock = Lock()
-FACE_INFER_WORKERS = int(os.getenv("FACE_INFER_WORKERS", 2))
+_shared_face_detector = None
+_face_session_lock    = Lock()
 
 
-def build_shared_face_detector() -> cv2.FaceDetectorYN:
-    backend_id = cv2.dnn.DNN_BACKEND_CUDA if DEVICE == "cuda" else cv2.dnn.DNN_BACKEND_OPENCV
-    target_id  = cv2.dnn.DNN_TARGET_CUDA  if DEVICE == "cuda" else cv2.dnn.DNN_TARGET_CPU
+def build_shared_face_detector():
+    backend_id   = cv2.dnn.DNN_BACKEND_CUDA   if _OCV_USE_CUDA else cv2.dnn.DNN_BACKEND_OPENCV
+    target_id    = cv2.dnn.DNN_TARGET_CUDA    if _OCV_USE_CUDA else cv2.dnn.DNN_TARGET_CPU
+    device_label = "CUDA" if _OCV_USE_CUDA else "CPU"
 
-    try:
-        det = cv2.FaceDetectorYN_create(
-            FACE_MODEL_PATH, "", (640, 640),
-            score_threshold=SCORE_THRESHOLD,
-            nms_threshold=0.4,
-            top_k=5000,
-            backend_id=backend_id,
-            target_id=target_id,
-        )
-        # Warmup
-        dummy = np.zeros((640, 640, 3), dtype=np.uint8)
-        det.setInputSize((640, 640))
-        det.detect(dummy)
-        print(f"[YUNET SHARED] Session created | device={DEVICE.upper()} | model={FACE_MODEL_PATH}")
-    except Exception as e:
-        print(f"[YUNET] GPU gagal ({e}), fallback ke CPU")
-        det = cv2.FaceDetectorYN_create(
-            FACE_MODEL_PATH, "", (640, 640),
-            score_threshold=SCORE_THRESHOLD,
-            nms_threshold=0.4,
-            top_k=5000,
-        )
-        # Warmup
-        dummy = np.zeros((640, 640, 3), dtype=np.uint8)
-        det.setInputSize((640, 640))
-        det.detect(dummy)
-        print(f"[YUNET SHARED] Fallback CPU | model={FACE_MODEL_PATH}")
-
+    det = cv2.FaceDetectorYN_create(
+        FACE_MODEL_PATH, "", (640, 640),
+        score_threshold=SCORE_THRESHOLD, nms_threshold=0.4, top_k=5000,
+        backend_id=backend_id, target_id=target_id,
+    )
+    dummy = np.zeros((640, 640, 3), dtype=np.uint8)
+    det.setInputSize((640, 640))
+    det.detect(dummy)
+    print(f"[YUNET SHARED] device={device_label} | model={FACE_MODEL_PATH}")
     return det
 
 
-def get_shared_face_detector() -> cv2.FaceDetectorYN:
+def get_shared_face_detector():
     global _shared_face_detector
     with _face_session_lock:
         if _shared_face_detector is None:
@@ -292,55 +321,33 @@ def get_shared_face_detector() -> cv2.FaceDetectorYN:
     return _shared_face_detector
 
 
-print(f"[STARTUP] Initializing shared YuNet session | device={DEVICE.upper()}...")
+print(f"[STARTUP] Inisialisasi YuNet session | device={DEVICE.upper()}...")
 get_shared_face_detector()
-print("[STARTUP] Shared YuNet session ready")
+print("[STARTUP] YuNet session siap")
 
-# ================= CENTRALIZED FACE INFERENCE QUEUE =================
-# Camera thread kirim frame → face worker detect → hasil balik lewat result_q
-# Camera thread TIDAK block di YuNet — langsung lanjut ambil frame berikutnya
+# ================= FACE INFERENCE WORKERS =================
 
-_face_infer_queue: Queue = Queue(maxsize=50)  # (cid, frame, result_q)
+_face_infer_queue: Queue = Queue(maxsize=50)
 
 
 def face_inference_worker(worker_id: int):
-    """
-    Worker terpusat YuNet.
-    Terima frame dari semua kamera, jalankan detect(), kembalikan hasil.
+    backend_id   = cv2.dnn.DNN_BACKEND_CUDA   if _OCV_USE_CUDA else cv2.dnn.DNN_BACKEND_OPENCV
+    target_id    = cv2.dnn.DNN_TARGET_CUDA    if _OCV_USE_CUDA else cv2.dnn.DNN_TARGET_CPU
+    device_label = "CUDA" if _OCV_USE_CUDA else "CPU"
 
-    PENTING: cv2.FaceDetectorYN TIDAK thread-safe untuk setInputSize()
-    karena method itu mutate internal state.
-    Solusi: tiap worker punya instance detector sendiri (model kecil ~1MB,
-    aman dibuat beberapa instance) tapi semua pakai file model yang sama.
-    Ini jauh lebih ringan dari per-kamera karena:
-    - Hanya FACE_INFER_WORKERS instance (default 2), bukan N kamera instance
-    - Camera thread tidak pernah block di detect()
-    """
-    backend_id = cv2.dnn.DNN_BACKEND_CUDA if DEVICE == "cuda" else cv2.dnn.DNN_BACKEND_OPENCV
-    target_id  = cv2.dnn.DNN_TARGET_CUDA  if DEVICE == "cuda" else cv2.dnn.DNN_TARGET_CPU
-
+    det = cv2.FaceDetectorYN_create(
+        FACE_MODEL_PATH, "", (640, 640),
+        score_threshold=SCORE_THRESHOLD, nms_threshold=0.4, top_k=5000,
+        backend_id=backend_id, target_id=target_id,
+    )
     try:
-        det = cv2.FaceDetectorYN_create(
-            FACE_MODEL_PATH, "", (640, 640),
-            score_threshold=SCORE_THRESHOLD,
-            nms_threshold=0.4,
-            top_k=5000,
-            backend_id=backend_id,
-            target_id=target_id,
-        )
+        dummy = np.zeros((640, 640, 3), dtype=np.uint8)
+        det.setInputSize((640, 640))
+        det.detect(dummy)
     except Exception as e:
-        print(f"[FACE WORKER {worker_id}] GPU gagal ({e}), fallback CPU")
-        det = cv2.FaceDetectorYN_create(
-            FACE_MODEL_PATH, "", (640, 640),
-            score_threshold=SCORE_THRESHOLD,
-            nms_threshold=0.4,
-            top_k=5000,
-        )
+        print(f"[FACE WORKER {worker_id}] Warmup gagal: {e} — worker tetap jalan")
 
-    dummy = np.zeros((640, 640, 3), dtype=np.uint8)
-    det.setInputSize((640, 640))
-    det.detect(dummy)
-    print(f"[FACE WORKER {worker_id}] Started | device={DEVICE.upper()}")
+    print(f"[FACE WORKER {worker_id}] Started | device={device_label}")
 
     while True:
         try:
@@ -349,7 +356,6 @@ def face_inference_worker(worker_id: int):
             continue
         if item is None:
             break
-
         cid, frame_resized, inv_scale, result_q = item
         try:
             h, w = frame_resized.shape[:2]
@@ -368,15 +374,14 @@ for _i in range(FACE_INFER_WORKERS):
 
 print(f"[STARTUP] {FACE_INFER_WORKERS} face inference worker(s) started")
 
-# ================= CENTRALIZED INFERENCE QUEUE (vehicle) =================
+# ================= VEHICLE INFERENCE WORKERS =================
 
 _infer_input_queue: Queue = Queue(maxsize=50)
-_INFER_WORKERS = int(os.getenv("INFER_WORKERS", 2))
 
 
 def inference_worker(worker_id: int):
     sess, input_name = get_shared_session()
-    print(f"[INFER WORKER {worker_id}] Started | device={DEVICE.upper()}")
+    print(f"[INFER WORKER {worker_id}] Started | provider={sess.get_providers()[0]}")
     while True:
         try:
             item = _infer_input_queue.get(timeout=1.0)
@@ -471,15 +476,10 @@ def enforce_limit(folder):
 def expand_crop_bbox(x1, y1, x2, y2, img_w, img_h, padding=None):
     if padding is None:
         padding = CROP_PADDING
-    w     = x2 - x1
-    h     = y2 - y1
-    pad_w = int(w * padding)
-    pad_h = int(h * padding)
-    x1    = max(0,     x1 - pad_w)
-    y1    = max(0,     y1 - pad_h)
-    x2    = min(img_w, x2 + pad_w)
-    y2    = min(img_h, y2 + pad_h)
-    return x1, y1, x2, y2
+    w, h   = x2 - x1, y2 - y1
+    pad_w  = int(w * padding)
+    pad_h  = int(h * padding)
+    return max(0, x1 - pad_w), max(0, y1 - pad_h), min(img_w, x2 + pad_w), min(img_h, y2 + pad_h)
 
 
 def bbox_center(x1, y1, x2, y2):
@@ -543,33 +543,32 @@ def calc_sharpness(img: np.ndarray) -> float:
 
 # ================= FACE QUALITY FILTER =================
 
-def is_valid_face(f, x, y, w, h, scale) -> bool:
-    """Validate face pose using landmark positions from YuNet."""
-    lx, ly = f[4] * scale, f[5] * scale   # left eye
-    rx, ry = f[6] * scale, f[7] * scale   # right eye
-    nx, ny = f[8] * scale, f[9] * scale   # nose tip
+def is_valid_face(f, x, y, fw, fh, scale) -> bool:
+    lx, ly = f[4] * scale, f[5] * scale
+    rx, ry = f[6] * scale, f[7] * scale
+    nx     = f[8] * scale
 
     eye_angle = abs(math.degrees(math.atan2(ry - ly, rx - lx)))
     if eye_angle > 40:
         return False
 
-    ratio = w / float(h)
+    ratio = fw / float(fh)
     if ratio < 0.50 or ratio > 1.50:
         return False
 
-    nose_ratio = (nx - x) / float(w)
+    nose_ratio = (nx - x) / float(fw)
     if nose_ratio < 0.15 or nose_ratio > 0.85:
         return False
 
     return True
 
 
-# ================= ONNX PRE/POSTPROCESS (vehicle) =================
+# ================= ONNX PRE/POSTPROCESS =================
 
 def preprocess(img: np.ndarray):
-    h, w   = img.shape[:2]
-    scale  = min(IMG_SIZE / w, IMG_SIZE / h)
-    nw, nh = int(w * scale), int(h * scale)
+    h, w    = img.shape[:2]
+    scale   = min(IMG_SIZE / w, IMG_SIZE / h)
+    nw, nh  = int(w * scale), int(h * scale)
     resized = cv2.resize(img, (nw, nh), interpolation=cv2.INTER_AREA)
     canvas  = np.full((IMG_SIZE, IMG_SIZE, 3), 114, dtype=np.uint8)
     canvas[:nh, :nw] = resized
@@ -585,8 +584,7 @@ def postprocess(outputs, scale: float, orig_w: int, orig_h: int):
         out = np.transpose(out, (0, 2, 1))
     out = out[0]
 
-    per_class: dict[str, dict] = {}
-
+    per_class = {}
     for row in out:
         cls_scores = row[4:]
         cls_id     = int(np.argmax(cls_scores))
@@ -594,7 +592,7 @@ def postprocess(outputs, scale: float, orig_w: int, orig_h: int):
         if cls_id >= len(COCO_CLASSES):
             continue
         class_name = COCO_CLASSES[cls_id]
-        if class_name not in CLASS_CONFIG:   # person sudah tidak ada di CLASS_CONFIG
+        if class_name not in CLASS_CONFIG:
             continue
         cfg = CLASS_CONFIG[class_name]
         if conf < cfg["conf"]:
@@ -629,7 +627,7 @@ def postprocess(outputs, scale: float, orig_w: int, orig_h: int):
     return results
 
 
-# ================= SIMPLE TRACKER =================
+# ================= TRACKER =================
 
 class ObjectTracker:
 
@@ -643,7 +641,7 @@ class ObjectTracker:
             return cls._global_id
 
     def __init__(self):
-        self.tracks: dict[int, dict] = {}
+        self.tracks = {}
 
     def update(self, detections: list) -> list:
         now = time.time()
@@ -670,10 +668,9 @@ class ObjectTracker:
             if best_id is not None:
                 t            = self.tracks[best_id]
                 t["matched"] = True
-
-                moved       = center_dist((cx, cy), (t["cx"], t["cy"])) > TRACK_MOVE_THR
-                cooldown_ok = (now - t["last_sent"]) >= cfg["cooldown"]
-                should_send = (not t["sent_once"]) or (cooldown_ok and moved)
+                moved        = center_dist((cx, cy), (t["cx"], t["cy"])) > TRACK_MOVE_THR
+                cooldown_ok  = (now - t["last_sent"]) >= cfg["cooldown"]
+                should_send  = (not t["sent_once"]) or (cooldown_ok and moved)
 
                 t["cx"], t["cy"] = cx, cy
                 t["history"].append((cx, cy))
@@ -693,7 +690,7 @@ class ObjectTracker:
             else:
                 new_id = self._next_id()
                 self.tracks[new_id] = {
-                    "history":  [(cx, cy)], "id": new_id, "cls_name": cls_name,
+                    "history": [(cx, cy)], "id": new_id, "cls_name": cls_name,
                     "cx": cx, "cy": cy, "x1": x1, "y1": y1, "x2": x2, "y2": y2,
                     "miss": 0, "last_sent": now, "sent_once": True,
                     "matched": True, "last_cross_dir": None,
@@ -703,14 +700,13 @@ class ObjectTracker:
                     "obj_id": new_id, "should_send": True, "is_new": True,
                 })
 
-        dead_ids = [tid for tid, t in self.tracks.items() if not t["matched"] and t["miss"] + 1 >= TRACK_MAX_MISS]
+        dead_ids = [
+            tid for tid, t in self.tracks.items()
+            if not t["matched"] and t["miss"] + 1 >= TRACK_MAX_MISS
+        ]
         for tid in dead_ids:
-            t = self.tracks[tid]
-            t["miss"] += 1
-            if t["miss"] >= TRACK_MAX_MISS:
-                del self.tracks[tid]
+            del self.tracks[tid]
 
-        # increment miss for unmatched (non-dead)
         for t in self.tracks.values():
             if not t["matched"]:
                 t["miss"] += 1
@@ -727,7 +723,6 @@ class ObjectTracker:
 # ================= WEBHOOK WORKERS =================
 
 def vehicle_webhook_worker():
-    """Handles vehicle detection webhook events."""
     while True:
         item = webhook_queue.get()
         if item is None:
@@ -739,8 +734,7 @@ def vehicle_webhook_worker():
             name_camera, ts_iso,
             bbox, conf, cls_name,
             cid, client_id,
-            obj_id, is_new,
-            direction,
+            obj_id, is_new, direction,
         ) = item
 
         payload = {
@@ -754,11 +748,7 @@ def vehicle_webhook_worker():
             "direction":  direction,
         }
 
-        log_payload = {
-            "url": WEBHOOK_URL, "frame_file": frame_name,
-            "channel_id": cid, "camera_name": name_camera, "data": payload,
-        }
-        print(f"\n[WEBHOOK VEHICLE] Sending:\n{json.dumps(log_payload, indent=4)}")
+        print(f"\n[WEBHOOK VEHICLE] {json.dumps({'url': WEBHOOK_URL, 'frame': frame_name, 'data': payload}, indent=2)}")
 
         sent = False
         for attempt in range(2):
@@ -773,12 +763,12 @@ def vehicle_webhook_worker():
                     timeout=10,
                 )
                 resp.raise_for_status()
-                print(f"[WEBHOOK VEHICLE OK] {frame_name} | id={obj_id} | class={cls_name} | http={resp.status_code}")
+                print(f"[WEBHOOK VEHICLE OK] {frame_name} | id={obj_id} | http={resp.status_code}")
                 sent = True
                 break
             except requests.exceptions.HTTPError as e:
-                status = e.response.status_code if e.response is not None else "?"
-                print(f"[WEBHOOK VEHICLE FAIL HTTP {status}] attempt={attempt + 1} | {e}")
+                status = e.response.status_code if e.response else "?"
+                print(f"[WEBHOOK VEHICLE FAIL HTTP {status}] attempt={attempt + 1}")
                 if attempt == 0:
                     time.sleep(2)
             except requests.exceptions.ConnectionError:
@@ -800,14 +790,13 @@ def vehicle_webhook_worker():
 
 
 def face_webhook_worker():
-    """Handles face detection webhook events."""
     while True:
         item = face_webhook_queue.get()
         if item is None:
             break
-
         try:
-            face_bytes, frame_bytes, face_name, frame_name, name_camera, ts_iso, bbox, score, cid, client_id = item
+            face_bytes, frame_bytes, face_name, frame_name, \
+                name_camera, ts_iso, bbox, score, cid, client_id = item
 
             payload = {
                 "timestamp":  ts_iso,
@@ -817,13 +806,7 @@ def face_webhook_worker():
                 "channel_id": cid,
                 "client_id":  client_id,
             }
-
-            log_payload = {
-                "url": WEBHOOK_URL, "frame_file": frame_name,
-                "channel_id": cid, "camera_name": name_camera, "data": payload,
-            }
-            print(f"\n[WEBHOOK FACE] Sending:\n{json.dumps(log_payload, indent=4)}")
-
+            print(f"\n[WEBHOOK FACE] {json.dumps({'url': WEBHOOK_URL, 'frame': frame_name, 'data': payload}, indent=2)}")
             resp = requests.post(
                 WEBHOOK_URL,
                 files=[("files", (frame_name, frame_bytes, "image/jpeg"))],
@@ -832,7 +815,6 @@ def face_webhook_worker():
             )
             resp.raise_for_status()
             print(f"[WEBHOOK FACE OK] {face_name} | conf={score:.3f} | http={resp.status_code}")
-
         except Exception as e:
             print(f"[WEBHOOK FACE FAIL] {e}")
         finally:
@@ -857,10 +839,9 @@ class CameraWorker:
         self.cid           = cid
         self.client_id     = client_id
         self.name_camera   = name
-        self.stream_source = url if DEBUG_MODE else "rtsp://" + url
+        self.stream_source = self._build_stream_url(url)
         self.running       = True
 
-        # ---- vehicle config ----
         self.vehicle_enabled = bool(vehicle_enabled) if vehicle_enabled is not None else DEFAULT_VEHICLE_ENABLED
         self.roi_polygon     = parse_roi(roi)
         self.line_pts        = parse_line(line)
@@ -868,20 +849,14 @@ class CameraWorker:
         raw_line_enabled     = bool(line_enabled) if line_enabled is not None else DEFAULT_LINE_ENABLED
         self.line_enabled    = raw_line_enabled if self.vehicle_enabled else False
 
-        # ---- face config ----
         self.face_enabled  = bool(face_enabled) if face_enabled is not None else DEFAULT_FACE_ENABLED
-        self.face_memory: dict = {}
+        self.face_memory   = {}
 
-        # ---- save image to disk flags ----
-        # True  → encode + tulis ke disk + kirim webhook
-        # False → encode + kirim webhook SAJA (tidak tulis ke disk)
         self.save_image_vehicle = (
-            bool(save_image_vehicle) if save_image_vehicle is not None
-            else DEFAULT_SAVE_IMAGE_VEHICLE
+            bool(save_image_vehicle) if save_image_vehicle is not None else DEFAULT_SAVE_IMAGE_VEHICLE
         )
         self.save_image_face = (
-            bool(save_image_face) if save_image_face is not None
-            else DEFAULT_SAVE_IMAGE_FACE
+            bool(save_image_face) if save_image_face is not None else DEFAULT_SAVE_IMAGE_FACE
         )
 
         self._log_config()
@@ -897,29 +872,41 @@ class CameraWorker:
         self.last_detect_time = time.time()
         self.last_face_time   = time.time()
 
-        self.tracker = ObjectTracker()
+        self.tracker        = ObjectTracker()
+        self._result_q      = Queue(maxsize=2)
+        self._face_result_q = Queue(maxsize=2)
 
-        # Per-camera result queue for vehicle inference
-        self._result_q: Queue = Queue(maxsize=2)
-
-        # RTSP capture
-        self.cap = cv2.VideoCapture(self.stream_source, cv2.CAP_FFMPEG)
-        self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-
-        if self.cap.isOpened():
-            self.connected = True
-            print(f"[RTSP CONNECTED] {cid} -> {name}")
-        else:
-            self.dead = True
-            print(f"[RTSP FAILED] {cid} -> {name}")
-
-        # Face detector sudah dipindah ke centralized worker — tidak perlu instance per kamera
-        # self.face_detector dihapus, pakai _face_infer_queue
-
-        # Per-camera result queue untuk face inference
-        self._face_result_q: Queue = Queue(maxsize=2)
+        self.cap = self._open_capture()
 
         print(f"[CAMERA START] {cid} -> {name} | vehicle={self.vehicle_enabled} | face={self.face_enabled}")
+
+    # ------------------------------------------------------------------ stream
+
+    def _build_stream_url(self, url: str) -> str:
+        """
+        Debug mode  → pakai path file langsung
+        Produksi    → rtsp:// + url asli
+        Parameter FFmpeg sudah diset via OPENCV_FFMPEG_CAPTURE_OPTIONS (env),
+        tidak perlu ditempel ke URL supaya lebih bersih & kompatibel.
+        """
+        if DEBUG_MODE:
+            return url
+        return f"rtsp://{url}"
+
+    def _open_capture(self) -> cv2.VideoCapture:
+        cap = cv2.VideoCapture(self.stream_source, cv2.CAP_FFMPEG)
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)   # buffer minimal → frame selalu fresh
+        cap.set(cv2.CAP_PROP_FPS, FRAME_FPS)  # hint FPS ke decoder
+        if cap.isOpened():
+            self.connected = True
+            self.dead      = False
+            print(f"[RTSP CONNECTED] {self.cid} -> {self.name_camera}")
+        else:
+            self.dead = True
+            print(f"[RTSP FAILED] {self.cid} -> {self.name_camera}")
+        return cap
+
+    # ------------------------------------------------------------------ config
 
     def _log_config(self):
         print(
@@ -930,8 +917,7 @@ class CameraWorker:
             f"| save_img_face={self.save_image_face} "
             f"| line_enabled={self.line_enabled} "
             f"| line={self.line_pts} "
-            f"| line_in_dir={self.line_in_dir} "
-            f"| roi={self.roi_polygon.tolist()}"
+            f"| line_in_dir={self.line_in_dir}"
         )
 
     def stop(self):
@@ -944,31 +930,16 @@ class CameraWorker:
                       save_image_vehicle=None, save_image_face=None):
         changed = False
 
-        new_vehicle = bool(vehicle_enabled) if vehicle_enabled is not None else DEFAULT_VEHICLE_ENABLED
-        if new_vehicle != self.vehicle_enabled:
-            self.vehicle_enabled = new_vehicle
-            changed = True
-
-        new_face = bool(face_enabled) if face_enabled is not None else DEFAULT_FACE_ENABLED
-        if new_face != self.face_enabled:
-            self.face_enabled = new_face
-            changed = True
-
-        new_siv = (
-            bool(save_image_vehicle) if save_image_vehicle is not None
-            else DEFAULT_SAVE_IMAGE_VEHICLE
-        )
-        if new_siv != self.save_image_vehicle:
-            self.save_image_vehicle = new_siv
-            changed = True
-
-        new_sif = (
-            bool(save_image_face) if save_image_face is not None
-            else DEFAULT_SAVE_IMAGE_FACE
-        )
-        if new_sif != self.save_image_face:
-            self.save_image_face = new_sif
-            changed = True
+        for attr, new_val, default in [
+            ("vehicle_enabled",    vehicle_enabled,    DEFAULT_VEHICLE_ENABLED),
+            ("face_enabled",       face_enabled,       DEFAULT_FACE_ENABLED),
+            ("save_image_vehicle", save_image_vehicle, DEFAULT_SAVE_IMAGE_VEHICLE),
+            ("save_image_face",    save_image_face,    DEFAULT_SAVE_IMAGE_FACE),
+        ]:
+            val = bool(new_val) if new_val is not None else default
+            if val != getattr(self, attr):
+                setattr(self, attr, val)
+                changed = True
 
         new_roi = parse_roi(roi)
         if not np.array_equal(new_roi, self.roi_polygon):
@@ -985,10 +956,10 @@ class CameraWorker:
             self.line_in_dir = new_dir
             changed = True
 
-        raw_line_enabled = bool(line_enabled) if line_enabled is not None else DEFAULT_LINE_ENABLED
-        effective_line   = raw_line_enabled if self.vehicle_enabled else False
-        if effective_line != self.line_enabled:
-            self.line_enabled = effective_line
+        raw_le       = bool(line_enabled) if line_enabled is not None else DEFAULT_LINE_ENABLED
+        effective_le = raw_le if self.vehicle_enabled else False
+        if effective_le != self.line_enabled:
+            self.line_enabled = effective_le
             changed = True
 
         if changed:
@@ -1007,29 +978,49 @@ class CameraWorker:
         return frame
 
     def resize_for_face(self, frame):
-        """Resize & return (resized_frame, inverse_scale) for face detection."""
-        h, w  = frame.shape[:2]
-        scale = min(1.0, TARGET_MAX_WIDTH / w)
+        h, w    = frame.shape[:2]
+        scale   = min(1.0, TARGET_MAX_WIDTH / w)
         resized = cv2.resize(frame, None, fx=scale, fy=scale) if scale < 1.0 else frame.copy()
-        # Ensure minimum 640 width for YuNet
         if resized.shape[1] < 640:
-            up    = 640 / resized.shape[1]
+            up      = 640 / resized.shape[1]
             resized = cv2.resize(resized, None, fx=up, fy=up)
-            scale = scale / up
+            scale   = scale / up
         return resized, 1.0 / scale
 
     def adaptive_fps(self):
-        idle_vehicle = time.time() - self.last_detect_time > IDLE_TIMEOUT
-        idle_face    = time.time() - self.last_face_time   > IDLE_TIMEOUT
-        if idle_vehicle and idle_face:
-            return 1.0 / IDLE_FPS
-        return 1.0 / FRAME_FPS
+        idle = (
+            time.time() - self.last_detect_time > IDLE_TIMEOUT and
+            time.time() - self.last_face_time   > IDLE_TIMEOUT
+        )
+        return 1.0 / IDLE_FPS if idle else 1.0 / FRAME_FPS
 
     def cleanup_face_memory(self):
-        now    = time.time()
-        stale  = [k for k, v in self.face_memory.items() if now - v[0] > 60]
+        now   = time.time()
+        stale = [k for k, v in self.face_memory.items() if now - v[0] > 60]
         for k in stale:
             del self.face_memory[k]
+
+    # ------------------------------------------------------------------ frame read
+
+    def _read_latest_frame(self):
+        """
+        Ambil frame terbaru dari buffer kamera.
+        Grab beberapa frame dulu untuk flush buffer lama,
+        lalu retrieve hanya yang terakhir.
+        Ini mencegah pemrosesan frame stale & mengurangi CPU decode sia-sia.
+        """
+        grabbed = 0
+        for _ in range(GRAB_SKIP_COUNT):
+            if not self.cap.grab():
+                break
+            grabbed += 1
+
+        if grabbed == 0:
+            # Tidak bisa grab sama sekali → stream mati
+            return False, None
+
+        ret, frame = self.cap.retrieve()
+        return ret, frame
 
     # ------------------------------------------------------------------ vehicle inference
 
@@ -1054,7 +1045,7 @@ class CameraWorker:
             pass
         return []
 
-    # ------------------------------------------------------------------ vehicle object processing
+    # ------------------------------------------------------------------ vehicle processing
 
     def _process_vehicle_object(self, obj, frame_original, view,
                                 orig_w, orig_h, scale_x, scale_y,
@@ -1065,36 +1056,24 @@ class CameraWorker:
         conf                = obj["conf"]
         cls_name            = obj["cls_name"]
         obj_id              = obj["obj_id"]
-        should_send         = obj["should_send"]
-        is_new              = obj["is_new"]
 
-        cfg   = CLASS_CONFIG[cls_name]
-        color = cfg["color"]
+        cfg    = CLASS_CONFIG[cls_name]
+        color  = cfg["color"]
         ts_iso = iso_timestamp()
-
         area   = (ox2 - ox1) * (oy2 - oy1)
         width  = ox2 - ox1
         height = oy2 - oy1
 
         cv2.rectangle(view, (x1, y1), (x2, y2), color, WIDTH_LINE)
         cv2.putText(
-            view,
-            f"#{obj_id} {cls_name} {conf:.2f} {area} {width}x{height}",
+            view, f"#{obj_id} {cls_name} {conf:.2f} {area} {width}x{height}",
             (x1, max(0, y1 - 10)),
             cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0), WIDTH_LINE,
         )
 
-        if DEBUG_MODE:
-            tag = "NEW" if is_new else ("SEND" if should_send else "SKIP")
-            print(f"[{self.cid}] ID={obj_id} {cls_name} conf={conf:.2f} -> {tag}")
+        cx, cy = bbox_center(x1, y1, x2, y2)
 
-        cx, cy        = bbox_center(x1, y1, x2, y2)
-        direction_out = None
-
-        # All detected classes here are vehicle classes — enforce line/ROI logic
-        if not self.vehicle_enabled:
-            return False
-        if not self.line_enabled:
+        if not self.vehicle_enabled or not self.line_enabled:
             return False
         if not self.is_inside_roi(cx, cy, roi_scaled):
             return False
@@ -1102,65 +1081,56 @@ class CameraWorker:
         track_data = self.tracker.tracks.get(obj_id)
         if track_data is None:
             return False
-
         track_data.setdefault("last_cross_dir", None)
 
         direction = check_line_cross(track_data["history"], line_scaled, self.line_in_dir)
-        if direction is None:
-            return False
-        if direction == track_data["last_cross_dir"]:
+        if direction is None or direction == track_data["last_cross_dir"]:
             return False
 
         track_data["last_cross_dir"] = direction
-        direction_out = direction
-        print(f"[VEHICLE] ID={obj_id} {cls_name} dir={direction_out} | cam={self.cid}")
+        print(f"[VEHICLE] ID={obj_id} {cls_name} dir={direction} | cam={self.cid}")
 
         cx1, cy1, cx2, cy2 = expand_crop_bbox(ox1, oy1, ox2, oy2, orig_w, orig_h, CROP_PADDING)
         crop_original      = frame_original[cy1:cy2, cx1:cx2]
-
-        crop_save  = prepare_for_save(crop_original)
-        frame_save = prepare_for_save(frame_original)
+        crop_save          = prepare_for_save(crop_original)
+        frame_save         = prepare_for_save(frame_original)
 
         _, crop_jpg       = cv2.imencode(".jpg", crop_save)
         crop_bytes        = crop_jpg.tobytes()
         _, frame_jpg      = cv2.imencode(".jpg", frame_save)
         frame_clean_bytes = frame_jpg.tobytes()
 
-        crop_name  = iso_name("crop",  cls_name, ts_iso, obj_id, direction_out)
-        frame_name = iso_name("frame", cls_name, ts_iso, obj_id, direction_out)
+        crop_name  = iso_name("crop",  cls_name, ts_iso, obj_id, direction)
+        frame_name = iso_name("frame", cls_name, ts_iso, obj_id, direction)
 
         if self.save_image_vehicle:
             try:
-                with open(os.path.join(DETECT_FOLDER, crop_name), "wb") as f:
-                    f.write(crop_bytes)
-                with open(os.path.join(FRAME_FOLDER_VEH, frame_name), "wb") as f:
-                    f.write(frame_clean_bytes)
+                with open(os.path.join(DETECT_FOLDER,    crop_name),  "wb") as f: f.write(crop_bytes)
+                with open(os.path.join(FRAME_FOLDER_VEH, frame_name), "wb") as f: f.write(frame_clean_bytes)
                 enforce_limit(DETECT_FOLDER)
                 enforce_limit(FRAME_FOLDER_VEH)
             except Exception as e:
                 print(f"[SAVE ERROR VEHICLE] {e}")
         else:
-            print(f"[SKIP SAVE VEHICLE] save_image_vehicle=False | {frame_name}")
+            print(f"[SKIP SAVE VEHICLE] {frame_name}")
 
         if WEBHOOK_URL:
             try:
                 webhook_queue.put_nowait((
-                    crop_bytes, frame_clean_bytes,
-                    crop_name, frame_name,
+                    crop_bytes, frame_clean_bytes, crop_name, frame_name,
                     self.name_camera, ts_iso,
                     (ox1, oy1, ox2, oy2), conf, cls_name,
                     self.cid, self.client_id,
-                    obj_id, is_new, direction_out,
+                    obj_id, obj["is_new"], direction,
                 ))
             except Exception:
                 print("[QUEUE FULL] vehicle webhook queue penuh")
 
         return True
 
-    # ------------------------------------------------------------------ face inference (async)
+    # ------------------------------------------------------------------ face inference
 
     def _submit_for_face_inference(self, frame_resized, inv_scale) -> bool:
-        """Submit frame ke centralized face worker (non-blocking)."""
         while not self._face_result_q.empty():
             try:
                 self._face_result_q.get_nowait()
@@ -1170,10 +1140,9 @@ class CameraWorker:
             _face_infer_queue.put_nowait((self.cid, frame_resized, inv_scale, self._face_result_q))
             return True
         except Exception:
-            return False  # queue penuh → skip frame ini
+            return False
 
     def _get_face_result(self, timeout=0.5):
-        """Tunggu hasil dari face worker. Return (faces_array | None, inv_scale)."""
         try:
             status, faces, inv_scale = self._face_result_q.get(timeout=timeout)
             if status == "ok":
@@ -1185,18 +1154,12 @@ class CameraWorker:
     # ------------------------------------------------------------------ face detection
 
     def _run_face_detection(self, frame_original, view):
-        """
-        Submit frame ke centralized face worker (async), tunggu hasil, proses.
-        Camera thread TIDAK block di YuNet — pola sama dengan vehicle inference.
-        """
         if not self.face_enabled:
             return
 
         resized, inv_scale = self.resize_for_face(frame_original)
-
-        submitted = self._submit_for_face_inference(resized, inv_scale)
-        if not submitted:
-            return  # face queue penuh → skip frame ini
+        if not self._submit_for_face_inference(resized, inv_scale):
+            return
 
         faces, inv_scale = self._get_face_result(timeout=0.5)
         if faces is None:
@@ -1210,68 +1173,45 @@ class CameraWorker:
                 continue
 
             x, y, fw, fh = f[:4].astype(int)
+            x  = int(x  * inv_scale); y  = int(y  * inv_scale)
+            fw = int(fw * inv_scale); fh = int(fh * inv_scale)
 
-            # Scale back to original frame coordinates
-            x  = int(x  * inv_scale)
-            y  = int(y  * inv_scale)
-            fw = int(fw * inv_scale)
-            fh = int(fh * inv_scale)
-
-            if fw < MIN_SIZE_CAPTURE:
+            if fw < MIN_SIZE_CAPTURE or fw > MAX_FACE_SIZE:
                 continue
-            if fw > MAX_FACE_SIZE:
-                continue
-
             if not is_valid_face(f, x, y, fw, fh, inv_scale):
                 continue
 
-            x  = max(0, x)
-            y  = max(0, y)
-            fw = min(fw, orig_w - x)
-            fh = min(fh, orig_h - y)
+            x  = max(0, x);  y  = max(0, y)
+            fw = min(fw, orig_w - x); fh = min(fh, orig_h - y)
+            cx = x + fw // 2; cy = y + fh // 2
 
-            cx = x + fw // 2
-            cy = y + fh // 2
-
-            # Anti-spam bucket logic
             bucket = (cx // FACE_BUCKET_SIZE, cy // FACE_BUCKET_SIZE)
             now    = time.time()
 
             if bucket in self.face_memory:
                 last_time, last_pos = self.face_memory[bucket]
-                dist = math.hypot(cx - last_pos[0], cy - last_pos[1])
                 if now - last_time < FACE_COOLDOWN:
                     continue
-                if dist < FACE_MOVE_THRESHOLD:
+                if math.hypot(cx - last_pos[0], cy - last_pos[1]) < FACE_MOVE_THRESHOLD:
                     continue
 
             self.face_memory[bucket] = (now, (cx, cy))
             self.last_face_time = time.time()
 
-            # Crop face
-            fx1, fy1, fx2, fy2 = expand_crop_bbox(
-                x, y, x + fw, y + fh, orig_w, orig_h, FACE_CROP_PADDING
-            )
+            fx1, fy1, fx2, fy2 = expand_crop_bbox(x, y, x + fw, y + fh, orig_w, orig_h, FACE_CROP_PADDING)
             face_img = frame_original[fy1:fy2, fx1:fx2]
 
-            if face_img.size == 0:
+            if face_img.size == 0 or calc_sharpness(face_img) < BLUR_THRESHOLD:
                 continue
 
-            if calc_sharpness(face_img) < BLUR_THRESHOLD:
-                continue
-
-            # Draw on view
             vscale = view.shape[1] / orig_w
-            vx1 = int(x  * vscale)
-            vy1 = int(y  * vscale)
-            vx2 = int((x + fw) * vscale)
-            vy2 = int((y + fh) * vscale)
-            cv2.rectangle(view, (vx1, vy1), (vx2, vy2), (0, 255, 0), WIDTH_LINE)
-            cv2.putText(
-                view, f"face {score:.2f}",
-                (vx1, max(0, vy1 - 10)),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.50, (0, 255, 0), WIDTH_LINE,
-            )
+            cv2.rectangle(view,
+                          (int(x * vscale), int(y * vscale)),
+                          (int((x + fw) * vscale), int((y + fh) * vscale)),
+                          (0, 255, 0), WIDTH_LINE)
+            cv2.putText(view, f"face {score:.2f}",
+                        (int(x * vscale), max(0, int(y * vscale) - 10)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.50, (0, 255, 0), WIDTH_LINE)
 
             ts_iso     = iso_timestamp()
             face_name  = iso_name("face",  "face", ts_iso)
@@ -1282,16 +1222,14 @@ class CameraWorker:
 
             if self.save_image_face:
                 try:
-                    with open(os.path.join(FACE_CROP_FOLDER,  face_name),  "wb") as fp:
-                        fp.write(fb1)
-                    with open(os.path.join(FACE_FRAME_FOLDER, frame_name), "wb") as fp:
-                        fp.write(fb2)
+                    with open(os.path.join(FACE_CROP_FOLDER,  face_name),  "wb") as fp: fp.write(fb1)
+                    with open(os.path.join(FACE_FRAME_FOLDER, frame_name), "wb") as fp: fp.write(fb2)
                     enforce_limit(FACE_CROP_FOLDER)
                     enforce_limit(FACE_FRAME_FOLDER)
                 except Exception as e:
                     print(f"[SAVE ERROR FACE] {e}")
             else:
-                print(f"[SKIP SAVE FACE] save_image_face=False | {frame_name}")
+                print(f"[SKIP SAVE FACE] {frame_name}")
 
             if WEBHOOK_URL:
                 try:
@@ -1310,19 +1248,16 @@ class CameraWorker:
 
     def run(self):
         while self.running:
-
             interval = self.adaptive_fps()
             if time.time() - self.last_time < interval:
                 time.sleep(0.005)
                 continue
             self.last_time = time.time()
 
-            for _ in range(2):
-                self.cap.grab()
+            # ── Ambil frame terbaru, flush buffer lama ─────────────────
+            ret, frame = self._read_latest_frame()
 
-            ret, frame = self.cap.read()
-
-            if ret:
+            if ret and frame is not None:
                 self.connected       = True
                 self.dead            = False
                 self.last_frame_time = time.time()
@@ -1340,38 +1275,35 @@ class CameraWorker:
 
             orig_h, orig_w = frame_original.shape[:2]
             inf_h,  inf_w  = frame_infer.shape[:2]
-
-            scale_x = orig_w / inf_w
-            scale_y = orig_h / inf_h
+            scale_x        = orig_w / inf_w
+            scale_y        = orig_h / inf_h
 
             roi_scaled  = scale_roi(self.roi_polygon, inf_w, inf_h)
             line_scaled = scale_line_pts(self.line_pts, inf_w, inf_h)
 
-            # ── Vehicle inference (async) ─────────────────────────────────
+            # ── Vehicle inference ──────────────────────────────────────
             if self.vehicle_enabled:
-                submitted = self._submit_for_inference(frame_infer)
-                if submitted:
-                    raw_dets_infer = self._get_inference_result(timeout=0.5)
-                    raw_dets_infer = raw_dets_infer[:20]
-                    tracked = self.tracker.update(raw_dets_infer)
+                if self._submit_for_inference(frame_infer):
+                    raw_dets = self._get_inference_result(timeout=0.5)[:20]
+                    tracked  = self.tracker.update(raw_dets)
 
                     if tracked:
                         self.last_detect_time = time.time()
 
-                    bbox_orig_map = {}
-                    for (x1, y1, x2, y2, conf, cls_name) in raw_dets_infer:
-                        bbox_orig_map[(x1, y1, x2, y2, cls_name)] = (
+                    bbox_orig_map = {
+                        (x1, y1, x2, y2, cls_name): (
                             int(x1 * scale_x), int(y1 * scale_y),
                             int(x2 * scale_x), int(y2 * scale_y),
                         )
+                        for (x1, y1, x2, y2, conf, cls_name) in raw_dets
+                    }
 
                     for obj in tracked:
                         bx1, by1, bx2, by2 = obj["bbox"]
-                        cls_name  = obj["cls_name"]
                         bbox_orig = bbox_orig_map.get(
-                            (bx1, by1, bx2, by2, cls_name),
-                            (int(bx1 * scale_x), int(by1 * scale_y),
-                             int(bx2 * scale_x), int(by2 * scale_y))
+                            (bx1, by1, bx2, by2, obj["cls_name"]),
+                            (int(bx1*scale_x), int(by1*scale_y),
+                             int(bx2*scale_x), int(by2*scale_y)),
                         )
                         self._process_vehicle_object(
                             obj, frame_original, view,
@@ -1379,11 +1311,11 @@ class CameraWorker:
                             bbox_orig, roi_scaled, line_scaled,
                         )
 
-            # ── Face detection (sync, per frame) ─────────────────────────
+            # ── Face detection ─────────────────────────────────────────
             self._run_face_detection(frame_original, view)
             self.cleanup_face_memory()
 
-            # ── Overlay ───────────────────────────────────────────────────
+            # ── Overlay ────────────────────────────────────────────────
             active = self.tracker.active_count()
             y_off  = 20
             for cls_n, cnt in active.items():
@@ -1391,10 +1323,8 @@ class CameraWorker:
                             cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0), WIDTH_LINE)
                 y_off += 20
 
-            if self.vehicle_enabled:
-                cv2.polylines(view, [roi_scaled], True, (255, 255, 0), WIDTH_LINE)
-            else:
-                cv2.polylines(view, [roi_scaled], True, (80, 80, 80), WIDTH_LINE)
+            roi_color = (255, 255, 0) if self.vehicle_enabled else (80, 80, 80)
+            cv2.polylines(view, [roi_scaled], True, roi_color, WIDTH_LINE)
 
             if not self.vehicle_enabled:
                 cv2.putText(view, "VEHICLE: OFF", (8, y_off),
@@ -1403,36 +1333,21 @@ class CameraWorker:
             elif self.line_enabled:
                 (lx1, ly1), (lx2, ly2) = line_scaled
                 cv2.line(view, (lx1, ly1), (lx2, ly2), (0, 0, 255), 1)
-
-                dx, dy = lx2 - lx1, ly2 - ly1
-                length = math.hypot(dx, dy) or 1
-                offset = 22
-                mid_x  = (lx1 + lx2) // 2
-                mid_y  = (ly1 + ly2) // 2
-                nx     = int(-dy / length * offset)
-                ny     = int( dx / length * offset)
-
-                FONT = cv2.FONT_HERSHEY_SIMPLEX
-                FS   = 0.45
-                TH   = WIDTH_LINE
-
+                dx, dy  = lx2 - lx1, ly2 - ly1
+                length  = math.hypot(dx, dy) or 1
+                offset  = 22
+                mid_x   = (lx1 + lx2) // 2
+                mid_y   = (ly1 + ly2) // 2
+                nx, ny  = int(-dy / length * offset), int(dx / length * offset)
+                FONT, FS, TH = cv2.FONT_HERSHEY_SIMPLEX, 0.45, WIDTH_LINE
                 (wa, ha), _ = cv2.getTextSize("A : IN",  FONT, FS, TH)
                 (wb, hb), _ = cv2.getTextSize("B : OUT", FONT, FS, TH)
-
-                ax, ay = mid_x + nx, mid_y + ny
-                bx, by = mid_x - nx, mid_y - ny
-
-                if nx < 0:
-                    ax -= wa
-                if nx > 0:
-                    bx -= wb
+                ax, ay = mid_x + nx, mid_y + ny + ha // 2
+                bx, by = mid_x - nx, mid_y - ny + hb // 2
+                if nx < 0:  ax -= wa
+                if nx > 0:  bx -= wb
                 elif nx == 0:
-                    ax -= wa // 2
-                    bx -= wb // 2
-
-                ay += ha // 2
-                by += hb // 2
-
+                    ax -= wa // 2; bx -= wb // 2
                 cv2.putText(view, "A : IN",  (ax, ay), FONT, FS, (0, 255, 0), TH)
                 cv2.putText(view, "B : OUT", (bx, by), FONT, FS, (0, 0, 255), TH)
             else:
@@ -1443,38 +1358,35 @@ class CameraWorker:
                 cv2.putText(view, "FACE: OFF", (8, y_off + 20),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.45, (100, 100, 100), WIDTH_LINE)
 
-            # Save image status overlay
-            siv_label = "SAVE VEH: ON" if self.save_image_vehicle else "SAVE VEH: OFF"
-            sif_label = "SAVE FACE: ON" if self.save_image_face    else "SAVE FACE: OFF"
+            # Device mode indicator
+            mode_label = {
+                "cuda":         "GPU: FULL CUDA",
+                "cuda_partial": "GPU: ORT CUDA | CV CPU",
+                "cpu":          "CPU MODE",
+            }.get(DEVICE, DEVICE.upper())
+            cv2.putText(view, mode_label, (8, view.shape[0] - 45),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.40,
+                        (0, 200, 0) if "cuda" in DEVICE else (100, 100, 100), WIDTH_LINE)
+
             siv_color = (0, 200, 0) if self.save_image_vehicle else (80, 80, 80)
             sif_color = (0, 200, 0) if self.save_image_face    else (80, 80, 80)
-            cv2.putText(view, siv_label, (8, view.shape[0] - 30),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.40, siv_color, WIDTH_LINE)
-            cv2.putText(view, sif_label, (8, view.shape[0] - 15),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.40, sif_color, WIDTH_LINE)
+            cv2.putText(view, "SAVE VEH: ON"  if self.save_image_vehicle else "SAVE VEH: OFF",
+                        (8, view.shape[0] - 30), cv2.FONT_HERSHEY_SIMPLEX, 0.40, siv_color, WIDTH_LINE)
+            cv2.putText(view, "SAVE FACE: ON" if self.save_image_face    else "SAVE FACE: OFF",
+                        (8, view.shape[0] - 15), cv2.FONT_HERSHEY_SIMPLEX, 0.40, sif_color, WIDTH_LINE)
 
             if self.running:
                 with preview_lock:
                     preview_frames[self.cid] = view
+
+    # ------------------------------------------------------------------ reconnect
 
     def _reconnect(self):
         print(f"[RECONNECT] {self.cid} -> {self.name_camera}")
         self.reconnecting = True
         self.cap.release()
         time.sleep(2)
-
-        self.cap = cv2.VideoCapture(self.stream_source, cv2.CAP_FFMPEG)
-        self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-
-        if self.cap.isOpened():
-            self.connected    = True
-            self.reconnecting = False
-            self.dead         = False
-            print(f"[RECONNECT OK] {self.cid}")
-        else:
-            self.dead = True
-            print(f"[RECONNECT FAIL] {self.cid} -> {self.name_camera}")
-
+        self.cap = self._open_capture()
         self.bad     = 0
         self.tracker = ObjectTracker()
         print(f"[TRACKER RESET] {self.cid}")
@@ -1489,18 +1401,13 @@ def load_cameras():
         for file in os.listdir(DEBUG_VIDEO_DIR):
             if file.lower().endswith(".mp4"):
                 videos.append({
-                    "cctv_id":            file,
-                    "client_id":          "debug",
-                    "stream_url":         os.path.join(DEBUG_VIDEO_DIR, file),
-                    "name":               file,
-                    "roi":                None,
-                    "line":               None,
-                    "line_in_dir":        None,
-                    "line_enabled":       None,
-                    "vehicle_enabled":    None,
-                    "face_enabled":       None,
-                    "save_image_vehicle": None,
-                    "save_image_face":    None,
+                    "cctv_id": file, "client_id": "debug",
+                    "stream_url": os.path.join(DEBUG_VIDEO_DIR, file),
+                    "name": file,
+                    "roi": None, "line": None, "line_in_dir": None,
+                    "line_enabled": None, "vehicle_enabled": None,
+                    "face_enabled": None,
+                    "save_image_vehicle": None, "save_image_face": None,
                 })
         print(f"[DEBUG] Total video: {len(videos)}")
         return videos
@@ -1516,7 +1423,7 @@ def load_cameras():
             return []
 
 
-# ================= STATUS MONITOR =================
+# ================= MONITORING =================
 
 def print_camera_status():
     with camera_lock:
@@ -1532,9 +1439,12 @@ def print_camera_status():
     print(f"Connected         : {connected}")
     print(f"Reconnecting      : {reconnecting}")
     print(f"Dead              : {dead}")
-    print(f"Save Img Vehicle  : {save_veh_on}/{total} cameras ON")
-    print(f"Save Img Face     : {save_face_on}/{total} cameras ON")
-    print(f"Device            : {DEVICE.upper()} (device_id={CUDA_DEVICE_ID})")
+    print(f"Save Img Vehicle  : {save_veh_on}/{total} ON")
+    print(f"Save Img Face     : {save_face_on}/{total} ON")
+    print(f"Device Mode       : {DEVICE.upper()} (device_id={CUDA_DEVICE_ID})")
+    print(f"ORT CUDA          : {_ORT_USE_CUDA}")
+    print(f"OpenCV CUDA       : {_OCV_USE_CUDA}")
+    print(f"GRAB_SKIP_COUNT   : {GRAB_SKIP_COUNT}")
     print(f"Vehicle Wbhk Queue: {webhook_queue.qsize()}")
     print(f"Face Wbhk Queue   : {face_webhook_queue.qsize()}")
     print(f"Vehicle Infer Q   : {_infer_input_queue.qsize()}")
@@ -1566,18 +1476,12 @@ def camera_manager():
                 if cid in new_ids:
                     try:
                         w = CameraWorker(
-                            cid,
-                            c["client_id"],
-                            c["stream_url"],
-                            c.get("name", "unknown"),
-                            roi                = c.get("roi"),
-                            line               = c.get("line"),
-                            line_in_dir        = c.get("line_in_dir"),
-                            line_enabled       = c.get("line_enabled"),
-                            vehicle_enabled    = c.get("vehicle_enabled"),
-                            face_enabled       = c.get("face_enabled"),
-                            save_image_vehicle = c.get("save_image_vehicle"),
-                            save_image_face    = c.get("save_image_face"),
+                            cid, c["client_id"], c["stream_url"], c.get("name", "unknown"),
+                            roi=c.get("roi"), line=c.get("line"),
+                            line_in_dir=c.get("line_in_dir"), line_enabled=c.get("line_enabled"),
+                            vehicle_enabled=c.get("vehicle_enabled"), face_enabled=c.get("face_enabled"),
+                            save_image_vehicle=c.get("save_image_vehicle"),
+                            save_image_face=c.get("save_image_face"),
                         )
                         Thread(target=w.run, daemon=True).start()
                         active_cameras[cid] = w
@@ -1586,14 +1490,11 @@ def camera_manager():
                         print(f"[FAILED START] {cid} -> {e}")
                 else:
                     active_cameras[cid].update_config(
-                        roi                = c.get("roi"),
-                        line               = c.get("line"),
-                        line_in_dir        = c.get("line_in_dir"),
-                        line_enabled       = c.get("line_enabled"),
-                        vehicle_enabled    = c.get("vehicle_enabled"),
-                        face_enabled       = c.get("face_enabled"),
-                        save_image_vehicle = c.get("save_image_vehicle"),
-                        save_image_face    = c.get("save_image_face"),
+                        roi=c.get("roi"), line=c.get("line"),
+                        line_in_dir=c.get("line_in_dir"), line_enabled=c.get("line_enabled"),
+                        vehicle_enabled=c.get("vehicle_enabled"), face_enabled=c.get("face_enabled"),
+                        save_image_vehicle=c.get("save_image_vehicle"),
+                        save_image_face=c.get("save_image_face"),
                     )
 
             for rid in removed_ids:
@@ -1605,12 +1506,10 @@ def camera_manager():
                     pass
 
             with preview_lock:
-                stale_cids = [cid for cid in list(preview_frames.keys()) if cid not in active_cameras]
-                for cid in stale_cids:
+                for cid in [c for c in list(preview_frames) if c not in active_cameras]:
                     del preview_frames[cid]
-                    print(f"[PREVIEW REMOVED] {cid}")
 
-            print(f"[MANAGER] Source API: {len(api_ids)} | Worker aktif: {len(active_cameras)}")
+            print(f"[MANAGER] API: {len(api_ids)} kamera | Aktif: {len(active_cameras)} worker")
 
         time.sleep(CAMERA_REFRESH_INTERVAL)
 
@@ -1645,26 +1544,15 @@ if ENABLE_VIEW:
         tw    = max(1, DISPLAY_WIDTH  // cols)
         th    = max(1, DISPLAY_HEIGHT // rows)
 
-        imgs = []
-        for f in snapshot:
-            try:
-                imgs.append(cv2.resize(f, (tw, th)))
-            except Exception:
-                imgs.append(np.zeros((th, tw, 3), dtype=np.uint8))
-
+        imgs = [cv2.resize(f, (tw, th)) for f in snapshot]
         while len(imgs) < rows * cols:
             imgs.append(np.zeros((th, tw, 3), dtype=np.uint8))
 
-        grid = []
-        for r in range(rows):
-            row_imgs = imgs[r * cols:(r + 1) * cols]
-            try:
-                grid.append(cv2.hconcat(row_imgs))
-            except Exception:
-                grid.append(np.zeros((th, tw * cols, 3), dtype=np.uint8))
-
         try:
-            final = cv2.vconcat(grid)
+            final = cv2.vconcat([
+                cv2.hconcat(imgs[r * cols:(r + 1) * cols])
+                for r in range(rows)
+            ])
         except Exception:
             final = np.zeros((DISPLAY_HEIGHT, DISPLAY_WIDTH, 3), dtype=np.uint8)
 
