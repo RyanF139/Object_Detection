@@ -1,14 +1,16 @@
 version: "3.9"
 
 services:
-
   object-detection:
     build: .
     container_name: object-detection
     command: python -u object-face-detection.py
+
     env_file:
-      - .env
+      - /opt/config/object-detection/.env
+
     volumes:
-      - ./image_detection:/app/image_detection
+      - /opt/config/object-detection/image_detection:/app/image_detection
+
     network_mode: host
     restart: unless-stopped
