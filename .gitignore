@@ -1,7 +1,10 @@
 __pycache__
-.venv
+venv
 .env
 .env.bac
 image_detection
 sample_videos
 image_face
+issue.md
+prompt.txt
+models_lib
