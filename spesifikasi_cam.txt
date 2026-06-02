@@ -1,0 +1,23 @@
+Main Stream :
+    - Resolusion        = 1920x1080
+    - Bitrate Type      = Variable
+    - Video Quality     = Medium
+    - Frame Rate        = 15
+    - MAx. Bitrate      = 2048
+    - Video Encoding    = H.264
+
+Main Stream for Vehicle :
+    - Resolusion        = 2688x1520
+    - Bitrate Type      = Variable
+    - Video Quality     = Highest
+    - Frame Rate        = 20
+    - MAx. Bitrate      = 4096
+    - Video Encoding    = H.264
+
+Sub Stream:
+    - Resolusion        = 640x360
+    - Bitrate Type      = Variable
+    - Video Quality     = Medium
+    - Frame Rate        = 15
+    - MAx. Bitrate      = 1024
+    - Video Encoding    = H.264

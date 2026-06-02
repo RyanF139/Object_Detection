@@ -5,10 +5,19 @@ services:
   object-detection:
     build: .
     container_name: object-detection
-    command: python -u object-face-detection.py
+    command: python -u object-face-weapon-detection.py
     env_file:
       - .env
     volumes:
       - ./image_detection:/app/image_detection
+      - ./image_face:/app/image_face
+      - ./image_weapon:/app/image_weapon
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
     network_mode: host
     restart: unless-stopped

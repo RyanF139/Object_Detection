@@ -39,6 +39,15 @@ pipeline {
             }
         }
 
+        stage('Verify GPU Status') {
+            steps {
+                sh '''
+                echo "=== GPU Status on Jenkins Host ==="
+                nvidia-smi || echo "NVIDIA GPU driver or nvidia-smi not found on host!"
+                '''
+            }
+        }
+
         stage('Stop Old Containers') {
             steps {
                 sh '''

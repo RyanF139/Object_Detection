@@ -16,4 +16,4 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-RUN mkdir -p image_detection/crop image_detection/frame
+RUN mkdir -p image_detection/crop image_detection/frame image_face/face image_face/frame image_weapon/weapon image_weapon/frame

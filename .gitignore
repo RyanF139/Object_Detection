@@ -5,3 +5,7 @@ __pycache__
 image_detection
 sample_videos
 image_face
+image_weapon
+models_lib
+prompt.txt
+issue.md
