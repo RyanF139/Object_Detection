@@ -1,6 +1,23 @@
 import cv2
 import time
 import os
+import sys
+import site
+
+# ================= FIX WINDOWS CUDA DLLS =================
+if os.name == 'nt':
+    try:
+        # Menambahkan path nvidia/* dll agar onnxruntime-gpu mendeteksi CUDA 12
+        for sp in site.getsitepackages():
+            if 'site-packages' in sp:
+                for n_lib in ['cublas', 'cudnn', 'cuda_runtime', 'cufft', 'curand', 'cusolver', 'cusparse']:
+                    bin_path = os.path.join(sp, 'nvidia', n_lib, 'bin')
+                    if os.path.exists(bin_path):
+                        os.add_dll_directory(bin_path)
+                        os.environ['PATH'] = bin_path + os.pathsep + os.environ.get('PATH', '')
+    except Exception as e:
+        pass
+
 import math
 import requests
 import numpy as np
@@ -106,7 +123,7 @@ def _resolve_device() -> str:
         return "cuda"
     elif ort_ok and not ocv_ok:
         print("[DEVICE] Mode: PARTIAL GPU — onnxruntime CUDA OK, OpenCV CUDA GAGAL")
-        print("         Vehicle inference → GPU | Face inference → CPU")
+        print("         Vehicle inference -> GPU | Face inference -> CPU")
         return "cuda_partial"
     else:
         print("[DEVICE] Mode: CPU (semua CUDA gagal, fallback otomatis)")
@@ -190,10 +207,19 @@ DEFAULT_LINE_IN_DIR  = "A"
 DEFAULT_LINE_ENABLED    = True
 DEFAULT_VEHICLE_ENABLED = os.getenv("VEHICLE_ENABLED", "true").lower() == "true"
 DEFAULT_FACE_ENABLED    = os.getenv("FACE_ENABLED",    "true").lower() == "true"
+DEFAULT_PERSON_ENABLED  = os.getenv("PERSON_ENABLED",  "true").lower() == "true"
+DEFAULT_PERSON_ROIS     = []
 DEFAULT_SAVE_IMAGE_VEHICLE = SAVE_IMAGE and SAVE_IMAGE_VEHICLE
 DEFAULT_SAVE_IMAGE_FACE    = SAVE_IMAGE and SAVE_IMAGE_FACE
 
 CLASS_CONFIG = {
+    "person": {
+        "conf":     float(os.getenv("PERSON_CONF",      0.50)),
+        "color":    tuple(map(int, os.getenv("PERSON_COLOR",    "0,255,0").split(","))),
+        "min_size": int(os.getenv("PERSON_MIN_SIZE",    0)),
+        "max_size": int(os.getenv("PERSON_MAX_SIZE",    0)),
+        "cooldown": int(os.getenv("PERSON_COOLDOWN",    10)),
+    },
     "car": {
         "conf":     float(os.getenv("CAR_CONF",      0.40)),
         "color":    tuple(map(int, os.getenv("CAR_COLOR",    "255,0,0").split(","))),
@@ -490,6 +516,30 @@ def center_dist(c1, c2):
     return math.hypot(c1[0] - c2[0], c1[1] - c2[1])
 
 
+def rect_intersects_polygon(x1, y1, x2, y2, polygon) -> bool:
+    cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
+    # Shift corner checks slightly towards the vertical center to avoid empty bounding box corners
+    # (which occur when arms/limbs are extended horizontally or diagonally)
+    dy_top = int((cy - y1) * 0.35)
+    dy_bot = int((y2 - cy) * 0.35)
+    
+    key_points = [
+        (cx, cy),           # Center
+        (cx, y1),           # Top-Center (Head)
+        (cx, y2),           # Bottom-Center (Feet)
+        (x1, cy),           # Left-Center (Left Arm/Hand)
+        (x2, cy),           # Right-Center (Right Arm/Hand)
+        (x1, y1 + dy_top),  # Upper-Left (Shifted from extreme corner)
+        (x2, y1 + dy_top),  # Upper-Right (Shifted from extreme corner)
+        (x1, y2 - dy_bot),  # Lower-Left (Shifted from extreme corner)
+        (x2, y2 - dy_bot)   # Lower-Right (Shifted from extreme corner)
+    ]
+    for pt in key_points:
+        if cv2.pointPolygonTest(polygon, (float(pt[0]), float(pt[1])), False) >= 0:
+            return True
+    return False
+
+
 def parse_roi(raw_roi):
     if raw_roi is None:
         return DEFAULT_ROI_POLYGON.copy()
@@ -524,6 +574,71 @@ def parse_line_in_dir(raw_dir):
     if raw_dir is not None:
         print(f"[LINE DIR ERROR] Invalid: {raw_dir!r}. Using default '{DEFAULT_LINE_IN_DIR}'.")
     return DEFAULT_LINE_IN_DIR
+
+
+def parse_multi_lines(raw_lines):
+    if raw_lines is None:
+        return []
+    if isinstance(raw_lines, str):
+        try:
+            raw_lines = json.loads(raw_lines)
+        except Exception:
+            return []
+    if not isinstance(raw_lines, list):
+        return []
+    
+    parsed = []
+    for idx, item in enumerate(raw_lines):
+        if not isinstance(item, dict):
+            continue
+        line = item.get("line")
+        line_in_dir = item.get("line_in_dir", "A")
+        
+        try:
+            arr = np.array(line, dtype=np.int32)
+            if arr.shape == (2, 2):
+                parsed.append({
+                    "line": ((int(arr[0][0]), int(arr[0][1])), (int(arr[1][0]), int(arr[1][1]))),
+                    "line_in_dir": "A" if line_in_dir == "A" else "B",
+                    "index": idx
+                })
+        except Exception:
+            pass
+    return parsed
+
+
+def parse_multi_rois(raw_rois):
+    if raw_rois is None:
+        return []
+    if isinstance(raw_rois, str):
+        try:
+            raw_rois = json.loads(raw_rois)
+        except Exception:
+            return []
+    if not isinstance(raw_rois, list):
+        return []
+    
+    parsed = []
+    for idx, item in enumerate(raw_rois):
+        if not isinstance(item, dict):
+            continue
+        roi = item.get("roi")
+        roi_enabled = item.get("roi_enabled", True)
+        if roi_enabled is None:
+            roi_enabled = True
+        
+        try:
+            arr = np.array(roi, dtype=np.int32)
+            if arr.ndim == 2 and arr.shape[1] == 2:
+                parsed.append({
+                    "roi": arr.tolist(),
+                    "roi_enabled": bool(roi_enabled),
+                    "index": int(item.get("index", idx))
+                })
+        except Exception:
+            pass
+    return parsed
+
 
 
 def prepare_for_save(img: np.ndarray) -> np.ndarray:
@@ -728,14 +843,26 @@ def vehicle_webhook_worker():
         if item is None:
             break
 
-        (
-            crop_bytes, frame_clean_bytes,
-            crop_name, frame_name,
-            name_camera, ts_iso,
-            bbox, conf, cls_name,
-            cid, client_id,
-            obj_id, is_new, direction,
-        ) = item
+        unpacked = item
+        line_name = None
+        if len(unpacked) == 15:
+            (
+                crop_bytes, frame_clean_bytes,
+                crop_name, frame_name,
+                name_camera, ts_iso,
+                bbox, conf, cls_name,
+                cid, client_id,
+                obj_id, is_new, direction, line_name,
+            ) = unpacked
+        else:
+            (
+                crop_bytes, frame_clean_bytes,
+                crop_name, frame_name,
+                name_camera, ts_iso,
+                bbox, conf, cls_name,
+                cid, client_id,
+                obj_id, is_new, direction,
+            ) = unpacked
 
         payload = {
             "timestamp":  ts_iso,
@@ -747,6 +874,8 @@ def vehicle_webhook_worker():
             "client_id":  client_id,
             "direction":  direction,
         }
+        if line_name is not None:
+            payload["line_name"] = line_name
 
         print(f"\n[WEBHOOK VEHICLE] {json.dumps({'url': WEBHOOK_URL, 'frame': frame_name, 'data': payload}, indent=2)}")
 
@@ -834,7 +963,8 @@ class CameraWorker:
                  roi=None, line=None, line_in_dir=None,
                  line_enabled=None, vehicle_enabled=None,
                  face_enabled=None,
-                 save_image_vehicle=None, save_image_face=None):
+                 save_image_vehicle=None, save_image_face=None,
+                 person_enabled=None, person_lines=None, person_rois=None):
 
         self.cid           = cid
         self.client_id     = client_id
@@ -851,6 +981,10 @@ class CameraWorker:
 
         self.face_enabled  = bool(face_enabled) if face_enabled is not None else DEFAULT_FACE_ENABLED
         self.face_memory   = {}
+
+        self.person_enabled = bool(person_enabled) if person_enabled is not None else DEFAULT_PERSON_ENABLED
+        self.person_lines   = parse_multi_lines(person_lines)
+        self.person_rois    = parse_multi_rois(person_rois)
 
         self.save_image_vehicle = (
             bool(save_image_vehicle) if save_image_vehicle is not None else DEFAULT_SAVE_IMAGE_VEHICLE
@@ -871,6 +1005,7 @@ class CameraWorker:
         self.last_time        = 0
         self.last_detect_time = time.time()
         self.last_face_time   = time.time()
+        self.last_person_time = time.time()
 
         self.tracker        = ObjectTracker()
         self._result_q      = Queue(maxsize=2)
@@ -878,7 +1013,7 @@ class CameraWorker:
 
         self.cap = self._open_capture()
 
-        print(f"[CAMERA START] {cid} -> {name} | vehicle={self.vehicle_enabled} | face={self.face_enabled}")
+        print(f"[CAMERA START] {cid} -> {name} | vehicle={self.vehicle_enabled} | face={self.face_enabled} | person={self.person_enabled}")
 
     # ------------------------------------------------------------------ stream
 
@@ -913,11 +1048,14 @@ class CameraWorker:
             f"[CAMERA CONFIG] {self.cid} "
             f"| vehicle={self.vehicle_enabled} "
             f"| face={self.face_enabled} "
+            f"| person={self.person_enabled} "
             f"| save_img_vehicle={self.save_image_vehicle} "
             f"| save_img_face={self.save_image_face} "
             f"| line_enabled={self.line_enabled} "
             f"| line={self.line_pts} "
-            f"| line_in_dir={self.line_in_dir}"
+            f"| line_in_dir={self.line_in_dir} "
+            f"| person_lines={self.person_lines} "
+            f"| person_rois={self.person_rois}"
         )
 
     def stop(self):
@@ -927,12 +1065,14 @@ class CameraWorker:
 
     def update_config(self, roi=None, line=None, line_in_dir=None,
                       line_enabled=None, vehicle_enabled=None, face_enabled=None,
-                      save_image_vehicle=None, save_image_face=None):
+                      save_image_vehicle=None, save_image_face=None,
+                      person_enabled=None, person_lines=None, person_rois=None):
         changed = False
 
         for attr, new_val, default in [
             ("vehicle_enabled",    vehicle_enabled,    DEFAULT_VEHICLE_ENABLED),
             ("face_enabled",       face_enabled,       DEFAULT_FACE_ENABLED),
+            ("person_enabled",     person_enabled,     DEFAULT_PERSON_ENABLED),
             ("save_image_vehicle", save_image_vehicle, DEFAULT_SAVE_IMAGE_VEHICLE),
             ("save_image_face",    save_image_face,    DEFAULT_SAVE_IMAGE_FACE),
         ]:
@@ -960,6 +1100,16 @@ class CameraWorker:
         effective_le = raw_le if self.vehicle_enabled else False
         if effective_le != self.line_enabled:
             self.line_enabled = effective_le
+            changed = True
+
+        new_pl = parse_multi_lines(person_lines)
+        if new_pl != self.person_lines:
+            self.person_lines = new_pl
+            changed = True
+
+        new_pr = parse_multi_rois(person_rois)
+        if new_pr != self.person_rois:
+            self.person_rois = new_pr
             changed = True
 
         if changed:
@@ -1128,6 +1278,149 @@ class CameraWorker:
 
         return True
 
+    # ------------------------------------------------------------------ person processing
+
+    def _process_person_object(self, obj, frame_original, view,
+                               orig_w, orig_h, scale_x, scale_y,
+                               bbox_orig, roi_scaled, person_lines_scaled,
+                               person_rois_scaled=None):
+        if not self.person_enabled or (not person_lines_scaled and not person_rois_scaled):
+            return False
+
+        x1, y1, x2, y2     = obj["bbox"]
+        ox1, oy1, ox2, oy2 = bbox_orig
+        conf                = obj["conf"]
+        cls_name            = obj["cls_name"]
+        obj_id              = obj["obj_id"]
+
+        cfg    = CLASS_CONFIG[cls_name]
+        color  = cfg["color"]
+        ts_iso = iso_timestamp()
+        area   = (ox2 - ox1) * (oy2 - oy1)
+        width  = ox2 - ox1
+        height = oy2 - oy1
+
+        cv2.rectangle(view, (x1, y1), (x2, y2), color, WIDTH_LINE)
+        cv2.putText(
+            view, f"#{obj_id} {cls_name} {conf:.2f} {area} {width}x{height}",
+            (x1, max(0, y1 - 10)),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, WIDTH_LINE,
+        )
+
+        cx, cy = bbox_center(x1, y1, x2, y2)
+
+        # Enforce global ROI check only if using person_lines without custom person_rois
+        if person_lines_scaled and not person_rois_scaled:
+            if not self.is_inside_roi(cx, cy, roi_scaled):
+                return False
+
+        track_data = self.tracker.tracks.get(obj_id)
+        if track_data is None:
+            return False
+        track_data.setdefault("last_cross_dirs", {})
+        track_data.setdefault("last_roi_states", {})
+
+        crossed_line_idx = None
+        triggered_roi_idx = None
+        direction = None
+
+        if person_lines_scaled:
+            for item in person_lines_scaled:
+                line_pts = item["line"]
+                line_in_dir = item["line_in_dir"]
+                idx_line = item["index"]
+
+                dir_cross = check_line_cross(track_data["history"], line_pts, line_in_dir)
+                if dir_cross is not None:
+                    last_dir = track_data["last_cross_dirs"].get(idx_line)
+                    if dir_cross != last_dir:
+                        track_data["last_cross_dirs"][idx_line] = dir_cross
+                        crossed_line_idx = idx_line
+                        direction = dir_cross
+                        break
+
+        if crossed_line_idx is None and person_rois_scaled:
+            # Moderate padding to detect slightly cut-off limbs without false positives from distant bodies
+            pad = 15
+            inf_h, inf_w = view.shape[:2]
+            px1 = max(0, x1 - pad)
+            py1 = max(0, y1 - pad)
+            px2 = min(inf_w, x2 + pad)
+            py2 = min(inf_h, y2 + pad)
+
+            track_data.setdefault("last_roi_send_times", {})
+            now = time.time()
+
+            for item in person_rois_scaled:
+                roi_pts = item["roi"]
+                idx_roi = item["index"]
+
+                is_inside = rect_intersects_polygon(px1, py1, px2, py2, roi_pts)
+                was_inside = track_data["last_roi_states"].get(idx_roi, False)
+
+                if is_inside:
+                    track_data["last_roi_states"][idx_roi] = True
+                    
+                    last_send = track_data["last_roi_send_times"].get(idx_roi, 0)
+                    if not was_inside or (now - last_send >= 5.0):
+                        track_data["last_roi_send_times"][idx_roi] = now
+                        triggered_roi_idx = idx_roi
+                        direction = "IN"
+                        break
+                else:
+                    track_data["last_roi_states"][idx_roi] = False
+                    if idx_roi in track_data["last_roi_send_times"]:
+                        del track_data["last_roi_send_times"][idx_roi]
+
+        if crossed_line_idx is None and triggered_roi_idx is None:
+            return False
+
+        self.last_person_time = time.time()
+        
+        if crossed_line_idx is not None:
+            print(f"[PERSON] ID={obj_id} dir={direction} | line_idx={crossed_line_idx} | cam={self.cid}")
+            crop_name  = iso_name("crop",  f"{cls_name}_line{crossed_line_idx}", ts_iso, obj_id, direction)
+            frame_name = iso_name("frame", f"{cls_name}_line{crossed_line_idx}", ts_iso, obj_id, direction)
+            line_name_val = crossed_line_idx
+        else:
+            print(f"[PERSON] ID={obj_id} dir={direction} | roi_idx={triggered_roi_idx} | cam={self.cid}")
+            crop_name  = iso_name("crop",  f"{cls_name}_roi{triggered_roi_idx}", ts_iso, obj_id, direction)
+            frame_name = iso_name("frame", f"{cls_name}_roi{triggered_roi_idx}", ts_iso, obj_id, direction)
+            line_name_val = triggered_roi_idx
+
+        cx1, cy1, cx2, cy2 = expand_crop_bbox(ox1, oy1, ox2, oy2, orig_w, orig_h, CROP_PADDING)
+        crop_original      = frame_original[cy1:cy2, cx1:cx2]
+        crop_save          = prepare_for_save(crop_original)
+        frame_save         = prepare_for_save(frame_original)
+
+        _, crop_jpg       = cv2.imencode(".jpg", crop_save)
+        crop_bytes        = crop_jpg.tobytes()
+        _, frame_jpg      = cv2.imencode(".jpg", frame_save)
+        frame_clean_bytes = frame_jpg.tobytes()
+
+        if self.save_image_vehicle:
+            try:
+                with open(os.path.join(DETECT_FOLDER,    crop_name),  "wb") as f: f.write(crop_bytes)
+                with open(os.path.join(FRAME_FOLDER_VEH, frame_name), "wb") as f: f.write(frame_clean_bytes)
+                enforce_limit(DETECT_FOLDER)
+                enforce_limit(FRAME_FOLDER_VEH)
+            except Exception as e:
+                print(f"[SAVE ERROR PERSON] {e}")
+
+        if WEBHOOK_URL:
+            try:
+                webhook_queue.put_nowait((
+                    crop_bytes, frame_clean_bytes, crop_name, frame_name,
+                    self.name_camera, ts_iso,
+                    (ox1, oy1, ox2, oy2), conf, cls_name,
+                    self.cid, self.client_id,
+                    obj_id, obj["is_new"], direction, line_name_val
+                ))
+            except Exception:
+                print("[QUEUE FULL] person webhook queue penuh")
+
+        return True
+
     # ------------------------------------------------------------------ face inference
 
     def _submit_for_face_inference(self, frame_resized, inv_scale) -> bool:
@@ -1280,9 +1573,28 @@ class CameraWorker:
 
             roi_scaled  = scale_roi(self.roi_polygon, inf_w, inf_h)
             line_scaled = scale_line_pts(self.line_pts, inf_w, inf_h)
+            person_lines_scaled = []
+            if self.person_enabled and self.person_lines:
+                for item in self.person_lines:
+                    scaled_pts = scale_line_pts(item["line"], inf_w, inf_h)
+                    person_lines_scaled.append({
+                        "line": scaled_pts,
+                        "line_in_dir": item["line_in_dir"],
+                        "index": item["index"]
+                    })
 
-            # ── Vehicle inference ──────────────────────────────────────
-            if self.vehicle_enabled:
+            person_rois_scaled = []
+            if self.person_enabled and self.person_rois:
+                for item in self.person_rois:
+                    if item.get("roi_enabled", True):
+                        scaled_pts = scale_roi(np.array(item["roi"], dtype=np.int32), inf_w, inf_h)
+                        person_rois_scaled.append({
+                            "roi": scaled_pts,
+                            "index": item["index"]
+                        })
+
+            # ── YOLO Inference (Vehicle & Person) ──────────────────────
+            if self.vehicle_enabled or self.person_enabled:
                 if self._submit_for_inference(frame_infer):
                     raw_dets = self._get_inference_result(timeout=0.5)[:20]
                     tracked  = self.tracker.update(raw_dets)
@@ -1300,16 +1612,25 @@ class CameraWorker:
 
                     for obj in tracked:
                         bx1, by1, bx2, by2 = obj["bbox"]
+                        cls_name = obj["cls_name"]
                         bbox_orig = bbox_orig_map.get(
-                            (bx1, by1, bx2, by2, obj["cls_name"]),
+                            (bx1, by1, bx2, by2, cls_name),
                             (int(bx1*scale_x), int(by1*scale_y),
                              int(bx2*scale_x), int(by2*scale_y)),
                         )
-                        self._process_vehicle_object(
-                            obj, frame_original, view,
-                            orig_w, orig_h, scale_x, scale_y,
-                            bbox_orig, roi_scaled, line_scaled,
-                        )
+                        if cls_name == "person":
+                            self._process_person_object(
+                                obj, frame_original, view,
+                                orig_w, orig_h, scale_x, scale_y,
+                                bbox_orig, roi_scaled, person_lines_scaled,
+                                person_rois_scaled,
+                            )
+                        else:
+                            self._process_vehicle_object(
+                                obj, frame_original, view,
+                                orig_w, orig_h, scale_x, scale_y,
+                                bbox_orig, roi_scaled, line_scaled,
+                            )
 
             # ── Face detection ─────────────────────────────────────────
             self._run_face_detection(frame_original, view)
@@ -1323,36 +1644,77 @@ class CameraWorker:
                             cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0), WIDTH_LINE)
                 y_off += 20
 
-            roi_color = (255, 255, 0) if self.vehicle_enabled else (80, 80, 80)
-            cv2.polylines(view, [roi_scaled], True, roi_color, WIDTH_LINE)
-
-            if not self.vehicle_enabled:
+            if self.vehicle_enabled:
+                cv2.polylines(view, [roi_scaled], True, (255, 255, 0), WIDTH_LINE)
+                if self.line_enabled:
+                    (lx1, ly1), (lx2, ly2) = line_scaled
+                    cv2.line(view, (lx1, ly1), (lx2, ly2), (0, 0, 255), 1)
+                    dx, dy  = lx2 - lx1, ly2 - ly1
+                    length  = math.hypot(dx, dy) or 1
+                    offset  = 22
+                    mid_x   = (lx1 + lx2) // 2
+                    mid_y   = (ly1 + ly2) // 2
+                    nx, ny  = int(-dy / length * offset), int(dx / length * offset)
+                    FONT, FS, TH = cv2.FONT_HERSHEY_SIMPLEX, 0.45, WIDTH_LINE
+                    (wa, ha), _ = cv2.getTextSize("A : IN",  FONT, FS, TH)
+                    (wb, hb), _ = cv2.getTextSize("B : OUT", FONT, FS, TH)
+                    ax, ay = mid_x + nx, mid_y + ny + ha // 2
+                    bx, by = mid_x - nx, mid_y - ny + hb // 2
+                    if nx < 0:  ax -= wa
+                    if nx > 0:  bx -= wb
+                    elif nx == 0:
+                        ax -= wa // 2; bx -= wb // 2
+                    cv2.putText(view, "A : IN",  (ax, ay), FONT, FS, (0, 255, 0), TH)
+                    cv2.putText(view, "B : OUT", (bx, by), FONT, FS, (0, 0, 255), TH)
+                else:
+                    cv2.putText(view, "LINE: OFF", (8, y_off),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.45, (100, 100, 100), WIDTH_LINE)
+                    y_off += 20
+            else:
                 cv2.putText(view, "VEHICLE: OFF", (8, y_off),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.45, (100, 100, 100), WIDTH_LINE)
                 y_off += 20
-            elif self.line_enabled:
-                (lx1, ly1), (lx2, ly2) = line_scaled
-                cv2.line(view, (lx1, ly1), (lx2, ly2), (0, 0, 255), 1)
-                dx, dy  = lx2 - lx1, ly2 - ly1
-                length  = math.hypot(dx, dy) or 1
-                offset  = 22
-                mid_x   = (lx1 + lx2) // 2
-                mid_y   = (ly1 + ly2) // 2
-                nx, ny  = int(-dy / length * offset), int(dx / length * offset)
-                FONT, FS, TH = cv2.FONT_HERSHEY_SIMPLEX, 0.45, WIDTH_LINE
-                (wa, ha), _ = cv2.getTextSize("A : IN",  FONT, FS, TH)
-                (wb, hb), _ = cv2.getTextSize("B : OUT", FONT, FS, TH)
-                ax, ay = mid_x + nx, mid_y + ny + ha // 2
-                bx, by = mid_x - nx, mid_y - ny + hb // 2
-                if nx < 0:  ax -= wa
-                if nx > 0:  bx -= wb
-                elif nx == 0:
-                    ax -= wa // 2; bx -= wb // 2
-                cv2.putText(view, "A : IN",  (ax, ay), FONT, FS, (0, 255, 0), TH)
-                cv2.putText(view, "B : OUT", (bx, by), FONT, FS, (0, 0, 255), TH)
-            else:
-                cv2.putText(view, "LINE: OFF", (8, y_off),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.45, (100, 100, 100), WIDTH_LINE)
+
+            # ── Overlay: Person Multi-Lines ───────────────────────────────
+            if self.person_enabled and person_lines_scaled:
+                for item in person_lines_scaled:
+                    (lx1, ly1), (lx2, ly2) = item["line"]
+                    idx_line = item["index"]
+                    line_in_dir = item["line_in_dir"]
+
+                    cv2.line(view, (lx1, ly1), (lx2, ly2), (255, 0, 255), 1)
+
+                    dx, dy  = lx2 - lx1, ly2 - ly1
+                    length  = math.hypot(dx, dy) or 1
+                    offset  = 22
+                    mid_x   = (lx1 + lx2) // 2
+                    mid_y   = (ly1 + ly2) // 2
+                    nx, ny  = int(-dy / length * offset), int(dx / length * offset)
+                    FONT, FS, TH = cv2.FONT_HERSHEY_SIMPLEX, 0.45, WIDTH_LINE
+
+                    label_a = f"L{idx_line} A:IN" if line_in_dir == "A" else f"L{idx_line} A:OUT"
+                    label_b = f"L{idx_line} B:OUT" if line_in_dir == "A" else f"L{idx_line} B:IN"
+
+                    (wa, ha), _ = cv2.getTextSize(label_a,  FONT, FS, TH)
+                    (wb, hb), _ = cv2.getTextSize(label_b, FONT, FS, TH)
+                    ax, ay = mid_x + nx, mid_y + ny + ha // 2
+                    bx, by = mid_x - nx, mid_y - ny + hb // 2
+                    if nx < 0:  ax -= wa
+                    if nx > 0:  bx -= wb
+                    elif nx == 0:
+                        ax -= wa // 2; bx -= wb // 2
+                    cv2.putText(view, label_a,  (ax, ay), FONT, FS, (0, 255, 0), TH)
+                    cv2.putText(view, label_b, (bx, by), FONT, FS, (0, 0, 255), TH)
+
+            # ── Overlay: Person Multi-ROIs ────────────────────────────────
+            if self.person_enabled and person_rois_scaled:
+                for item in person_rois_scaled:
+                    roi_pts = item["roi"]
+                    idx_roi = item["index"]
+                    cv2.polylines(view, [roi_pts], True, (255, 0, 255), WIDTH_LINE)
+                    if len(roi_pts) > 0:
+                        cv2.putText(view, f"ROI {idx_roi}", (int(roi_pts[0][0]), int(roi_pts[0][1]) - 5),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 0, 255), WIDTH_LINE)
 
             if not self.face_enabled:
                 cv2.putText(view, "FACE: OFF", (8, y_off + 20),
@@ -1408,6 +1770,15 @@ def load_cameras():
                     "line_enabled": None, "vehicle_enabled": None,
                     "face_enabled": None,
                     "save_image_vehicle": None, "save_image_face": None,
+                    "person_enabled": True,
+                    "person_lines": [
+                        {"line": [[50, 100], [300, 300]], "line_in_dir": "A", "name": "Garis_A"},
+                        {"line": [[320, 300], [580, 100]], "line_in_dir": "B", "name": "Garis_B"}
+                    ],
+                    "person_rois": [
+                        {"roi": [[50, 50], [200, 50], [200, 200], [50, 200]], "roi_enabled": True, "name": "ROI_Orang_A"},
+                        {"roi": [[350, 50], [500, 50], [500, 200], [350, 200]], "roi_enabled": True, "name": "ROI_Orang_B"}
+                    ]
                 })
         print(f"[DEBUG] Total video: {len(videos)}")
         return videos
@@ -1482,6 +1853,9 @@ def camera_manager():
                             vehicle_enabled=c.get("vehicle_enabled"), face_enabled=c.get("face_enabled"),
                             save_image_vehicle=c.get("save_image_vehicle"),
                             save_image_face=c.get("save_image_face"),
+                            person_enabled=c.get("person_enabled"),
+                            person_lines=c.get("person_lines"),
+                            person_rois=c.get("person_rois"),
                         )
                         Thread(target=w.run, daemon=True).start()
                         active_cameras[cid] = w
@@ -1495,6 +1869,9 @@ def camera_manager():
                         vehicle_enabled=c.get("vehicle_enabled"), face_enabled=c.get("face_enabled"),
                         save_image_vehicle=c.get("save_image_vehicle"),
                         save_image_face=c.get("save_image_face"),
+                        person_enabled=c.get("person_enabled"),
+                        person_lines=c.get("person_lines"),
+                        person_rois=c.get("person_rois"),
                     )
 
             for rid in removed_ids:
