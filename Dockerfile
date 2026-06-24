@@ -18,5 +18,6 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
-
 RUN mkdir -p image_detection/crop image_detection/frame
+
+CMD ["python", "-u", "object-face-detection.py"]
