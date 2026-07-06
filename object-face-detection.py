@@ -593,6 +593,7 @@ def parse_multi_lines(raw_lines):
             continue
         line = item.get("line")
         line_in_dir = item.get("line_in_dir", "A")
+        line_name = item.get("name", str(idx))
         
         try:
             arr = np.array(line, dtype=np.int32)
@@ -600,7 +601,8 @@ def parse_multi_lines(raw_lines):
                 parsed.append({
                     "line": ((int(arr[0][0]), int(arr[0][1])), (int(arr[1][0]), int(arr[1][1]))),
                     "line_in_dir": "A" if line_in_dir == "A" else "B",
-                    "index": idx
+                    "index": idx,
+                    "name": line_name
                 })
         except Exception:
             pass
@@ -626,6 +628,7 @@ def parse_multi_rois(raw_rois):
         roi_enabled = item.get("roi_enabled", True)
         if roi_enabled is None:
             roi_enabled = True
+        roi_name = item.get("name", str(item.get("index", idx)))
         
         try:
             arr = np.array(roi, dtype=np.int32)
@@ -633,7 +636,8 @@ def parse_multi_rois(raw_rois):
                 parsed.append({
                     "roi": arr.tolist(),
                     "roi_enabled": bool(roi_enabled),
-                    "index": int(item.get("index", idx))
+                    "index": int(item.get("index", idx)),
+                    "name": roi_name
                 })
         except Exception:
             pass
@@ -866,7 +870,7 @@ def vehicle_webhook_worker():
 
         payload = {
             "timestamp":  ts_iso,
-            "type":       "object_detection_service",
+            "type":       "line_detection_service" if cls_name == "person" else "object_detection_service",
             "class_name": cls_name,
             "bbox":       f"{bbox[0]},{bbox[1]},{bbox[2]},{bbox[3]}",
             "confidence": round(conf, 4),
@@ -875,9 +879,14 @@ def vehicle_webhook_worker():
             "direction":  direction,
         }
         if line_name is not None:
-            payload["line_name"] = line_name
+            if isinstance(line_name, dict):
+                payload["line_name"] = line_name.get("name", line_name.get("index"))
+                payload["line_index"] = line_name.get("index")
+            else:
+                payload["line_name"] = line_name
+                payload["line_index"] = line_name
 
-        print(f"\n[WEBHOOK VEHICLE] {json.dumps({'url': WEBHOOK_URL, 'frame': frame_name, 'data': payload}, indent=2)}")
+        print(f"\n[WEBHOOK {cls_name.upper()}] {json.dumps({'url': WEBHOOK_URL, 'frame': frame_name, 'data': payload}, indent=2)}")
 
         sent = False
         for attempt in range(2):
@@ -892,28 +901,28 @@ def vehicle_webhook_worker():
                     timeout=10,
                 )
                 resp.raise_for_status()
-                print(f"[WEBHOOK VEHICLE OK] {frame_name} | id={obj_id} | http={resp.status_code}")
+                print(f"[WEBHOOK {cls_name.upper()} OK] {frame_name} | id={obj_id} | http={resp.status_code}")
                 sent = True
                 break
             except requests.exceptions.HTTPError as e:
                 status = e.response.status_code if e.response else "?"
-                print(f"[WEBHOOK VEHICLE FAIL HTTP {status}] attempt={attempt + 1}")
+                print(f"[WEBHOOK {cls_name.upper()} FAIL HTTP {status}] attempt={attempt + 1}")
                 if attempt == 0:
                     time.sleep(2)
             except requests.exceptions.ConnectionError:
-                print(f"[WEBHOOK VEHICLE FAIL CONNECTION] attempt={attempt + 1}")
+                print(f"[WEBHOOK {cls_name.upper()} FAIL CONNECTION] attempt={attempt + 1}")
                 if attempt == 0:
                     time.sleep(2)
             except requests.exceptions.Timeout:
-                print(f"[WEBHOOK VEHICLE FAIL TIMEOUT] attempt={attempt + 1}")
+                print(f"[WEBHOOK {cls_name.upper()} FAIL TIMEOUT] attempt={attempt + 1}")
                 if attempt == 0:
                     time.sleep(1)
             except Exception as e:
-                print(f"[WEBHOOK VEHICLE FAIL UNEXPECTED] {e}")
+                print(f"[WEBHOOK {cls_name.upper()} FAIL UNEXPECTED] {e}")
                 break
 
         if not sent:
-            print(f"[WEBHOOK VEHICLE GIVE UP] {frame_name} | id={obj_id}")
+            print(f"[WEBHOOK {cls_name.upper()} GIVE UP] {frame_name} | id={obj_id}")
 
         webhook_queue.task_done()
 
@@ -1321,7 +1330,9 @@ class CameraWorker:
         track_data.setdefault("last_roi_states", {})
 
         crossed_line_idx = None
+        crossed_line_name = None
         triggered_roi_idx = None
+        triggered_roi_name = None
         direction = None
 
         if person_lines_scaled:
@@ -1336,6 +1347,7 @@ class CameraWorker:
                     if dir_cross != last_dir:
                         track_data["last_cross_dirs"][idx_line] = dir_cross
                         crossed_line_idx = idx_line
+                        crossed_line_name = item.get("name", idx_line)
                         direction = dir_cross
                         break
 
@@ -1365,6 +1377,7 @@ class CameraWorker:
                     if not was_inside or (now - last_send >= 5.0):
                         track_data["last_roi_send_times"][idx_roi] = now
                         triggered_roi_idx = idx_roi
+                        triggered_roi_name = item.get("name", idx_roi)
                         direction = "IN"
                         break
                 else:
@@ -1381,12 +1394,12 @@ class CameraWorker:
             print(f"[PERSON] ID={obj_id} dir={direction} | line_idx={crossed_line_idx} | cam={self.cid}")
             crop_name  = iso_name("crop",  f"{cls_name}_line{crossed_line_idx}", ts_iso, obj_id, direction)
             frame_name = iso_name("frame", f"{cls_name}_line{crossed_line_idx}", ts_iso, obj_id, direction)
-            line_name_val = crossed_line_idx
+            line_name_val = {"index": crossed_line_idx, "name": crossed_line_name}
         else:
             print(f"[PERSON] ID={obj_id} dir={direction} | roi_idx={triggered_roi_idx} | cam={self.cid}")
             crop_name  = iso_name("crop",  f"{cls_name}_roi{triggered_roi_idx}", ts_iso, obj_id, direction)
             frame_name = iso_name("frame", f"{cls_name}_roi{triggered_roi_idx}", ts_iso, obj_id, direction)
-            line_name_val = triggered_roi_idx
+            line_name_val = {"index": triggered_roi_idx, "name": triggered_roi_name}
 
         cx1, cy1, cx2, cy2 = expand_crop_bbox(ox1, oy1, ox2, oy2, orig_w, orig_h, CROP_PADDING)
         crop_original      = frame_original[cy1:cy2, cx1:cx2]
@@ -1580,7 +1593,8 @@ class CameraWorker:
                     person_lines_scaled.append({
                         "line": scaled_pts,
                         "line_in_dir": item["line_in_dir"],
-                        "index": item["index"]
+                        "index": item["index"],
+                        "name": item.get("name")
                     })
 
             person_rois_scaled = []
@@ -1590,7 +1604,8 @@ class CameraWorker:
                         scaled_pts = scale_roi(np.array(item["roi"], dtype=np.int32), inf_w, inf_h)
                         person_rois_scaled.append({
                             "roi": scaled_pts,
-                            "index": item["index"]
+                            "index": item["index"],
+                            "name": item.get("name")
                         })
 
             # ── YOLO Inference (Vehicle & Person) ──────────────────────
