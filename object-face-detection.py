@@ -848,8 +848,20 @@ def vehicle_webhook_worker():
             break
 
         unpacked = item
-        line_name = None
-        if len(unpacked) == 15:
+        line_name  = None
+        roi_info   = None
+
+        if len(unpacked) == 16:
+            # ROI person event — element ke-15 adalah dict {"index", "name"}, ke-16 flag True
+            (
+                crop_bytes, frame_clean_bytes,
+                crop_name, frame_name,
+                name_camera, ts_iso,
+                bbox, conf, cls_name,
+                cid, client_id,
+                obj_id, is_new, _, roi_info, _is_roi,
+            ) = unpacked
+        elif len(unpacked) == 15:
             (
                 crop_bytes, frame_clean_bytes,
                 crop_name, frame_name,
@@ -868,23 +880,38 @@ def vehicle_webhook_worker():
                 obj_id, is_new, direction,
             ) = unpacked
 
-        payload = {
-            "timestamp":  ts_iso,
-            "type":       "line_detection_service" if cls_name == "person" else "object_detection_service",
-            "class_name": cls_name,
-            "bbox":       f"{bbox[0]},{bbox[1]},{bbox[2]},{bbox[3]}",
-            "confidence": round(conf, 4),
-            "channel_id": cid,
-            "client_id":  client_id,
-            "direction":  direction,
-        }
-        if line_name is not None:
-            if isinstance(line_name, dict):
-                payload["line_name"] = line_name.get("name", line_name.get("index"))
-                payload["line_index"] = line_name.get("index")
-            else:
-                payload["line_name"] = line_name
-                payload["line_index"] = line_name
+        if roi_info is not None:
+            # --- ROI detection event (person entered ROI) ---
+            payload = {
+                "timestamp":  ts_iso,
+                "type":       "roi_detection_service",
+                "class_name": cls_name,
+                "bbox":       f"{bbox[0]},{bbox[1]},{bbox[2]},{bbox[3]}",
+                "confidence": round(conf, 4),
+                "channel_id": cid,
+                "client_id":  client_id,
+                "roi_index":  roi_info.get("index"),
+                "roi_name":   roi_info.get("name"),
+            }
+        else:
+            # --- Line / vehicle detection event ---
+            payload = {
+                "timestamp":  ts_iso,
+                "type":       "line_detection_service" if cls_name == "person" else "object_detection_service",
+                "class_name": cls_name,
+                "bbox":       f"{bbox[0]},{bbox[1]},{bbox[2]},{bbox[3]}",
+                "confidence": round(conf, 4),
+                "channel_id": cid,
+                "client_id":  client_id,
+                "direction":  direction,
+            }
+            if line_name is not None:
+                if isinstance(line_name, dict):
+                    payload["line_name"]  = line_name.get("name", line_name.get("index"))
+                    payload["line_index"] = line_name.get("index")
+                else:
+                    payload["line_name"]  = line_name
+                    payload["line_index"] = line_name
 
         print(f"\n[WEBHOOK {cls_name.upper()}] {json.dumps({'url': WEBHOOK_URL, 'frame': frame_name, 'data': payload}, indent=2)}")
 
@@ -1019,6 +1046,7 @@ class CameraWorker:
         self.tracker        = ObjectTracker()
         self._result_q      = Queue(maxsize=2)
         self._face_result_q = Queue(maxsize=2)
+        self._roi_send_times = {}   # cooldown per ROI index, level kamera (tidak hilang saat obj_id berganti)
 
         self.cap = self._open_capture()
 
@@ -1360,30 +1388,32 @@ class CameraWorker:
             px2 = min(inf_w, x2 + pad)
             py2 = min(inf_h, y2 + pad)
 
-            track_data.setdefault("last_roi_send_times", {})
+            track_data.setdefault("last_roi_send_times", {})  # tidak dipakai lagi, placeholder
             now = time.time()
 
             for item in person_rois_scaled:
                 roi_pts = item["roi"]
                 idx_roi = item["index"]
 
-                is_inside = rect_intersects_polygon(px1, py1, px2, py2, roi_pts)
+                is_inside  = rect_intersects_polygon(px1, py1, px2, py2, roi_pts)
                 was_inside = track_data["last_roi_states"].get(idx_roi, False)
 
                 if is_inside:
                     track_data["last_roi_states"][idx_roi] = True
-                    
-                    last_send = track_data["last_roi_send_times"].get(idx_roi, 0)
-                    if not was_inside or (now - last_send >= 5.0):
-                        track_data["last_roi_send_times"][idx_roi] = now
-                        triggered_roi_idx = idx_roi
+
+                    # Cooldown diambil dari level kamera agar tidak hilang saat obj_id berganti
+                    last_send = self._roi_send_times.get(idx_roi, 0)
+                    # Kirim hanya saat baru masuk (was_inside=False) DAN cooldown kamera sudah lewat
+                    if not was_inside and (now - last_send >= 5.0):
+                        self._roi_send_times[idx_roi] = now
+                        triggered_roi_idx  = idx_roi
                         triggered_roi_name = item.get("name", idx_roi)
                         direction = "IN"
                         break
                 else:
+                    # Reset state masuk/keluar per-track
+                    # last_roi_send_times kamera TIDAK direset agar cooldown tetap berlaku
                     track_data["last_roi_states"][idx_roi] = False
-                    if idx_roi in track_data["last_roi_send_times"]:
-                        del track_data["last_roi_send_times"][idx_roi]
 
         if crossed_line_idx is None and triggered_roi_idx is None:
             return False
@@ -1394,12 +1424,10 @@ class CameraWorker:
             print(f"[PERSON] ID={obj_id} dir={direction} | line_idx={crossed_line_idx} | cam={self.cid}")
             crop_name  = iso_name("crop",  f"{cls_name}_line{crossed_line_idx}", ts_iso, obj_id, direction)
             frame_name = iso_name("frame", f"{cls_name}_line{crossed_line_idx}", ts_iso, obj_id, direction)
-            line_name_val = {"index": crossed_line_idx, "name": crossed_line_name}
         else:
-            print(f"[PERSON] ID={obj_id} dir={direction} | roi_idx={triggered_roi_idx} | cam={self.cid}")
-            crop_name  = iso_name("crop",  f"{cls_name}_roi{triggered_roi_idx}", ts_iso, obj_id, direction)
-            frame_name = iso_name("frame", f"{cls_name}_roi{triggered_roi_idx}", ts_iso, obj_id, direction)
-            line_name_val = {"index": triggered_roi_idx, "name": triggered_roi_name}
+            print(f"[PERSON ROI] ID={obj_id} roi_idx={triggered_roi_idx} | cam={self.cid}")
+            crop_name  = iso_name("crop",  f"{cls_name}_roi{triggered_roi_idx}", ts_iso, obj_id, "IN")
+            frame_name = iso_name("frame", f"{cls_name}_roi{triggered_roi_idx}", ts_iso, obj_id, "IN")
 
         cx1, cy1, cx2, cy2 = expand_crop_bbox(ox1, oy1, ox2, oy2, orig_w, orig_h, CROP_PADDING)
         crop_original      = frame_original[cy1:cy2, cx1:cx2]
@@ -1422,13 +1450,26 @@ class CameraWorker:
 
         if WEBHOOK_URL:
             try:
-                webhook_queue.put_nowait((
-                    crop_bytes, frame_clean_bytes, crop_name, frame_name,
-                    self.name_camera, ts_iso,
-                    (ox1, oy1, ox2, oy2), conf, cls_name,
-                    self.cid, self.client_id,
-                    obj_id, obj["is_new"], direction, line_name_val
-                ))
+                if crossed_line_idx is not None:
+                    # Line crossing event — include direction and line info
+                    line_name_val = {"index": crossed_line_idx, "name": crossed_line_name}
+                    webhook_queue.put_nowait((
+                        crop_bytes, frame_clean_bytes, crop_name, frame_name,
+                        self.name_camera, ts_iso,
+                        (ox1, oy1, ox2, oy2), conf, cls_name,
+                        self.cid, self.client_id,
+                        obj_id, obj["is_new"], direction, line_name_val
+                    ))
+                else:
+                    # ROI entry event — 16-element tuple (True flag = penanda ROI)
+                    roi_info_val = {"index": triggered_roi_idx, "name": triggered_roi_name}
+                    webhook_queue.put_nowait((
+                        crop_bytes, frame_clean_bytes, crop_name, frame_name,
+                        self.name_camera, ts_iso,
+                        (ox1, oy1, ox2, oy2), conf, cls_name,
+                        self.cid, self.client_id,
+                        obj_id, obj["is_new"], None, roi_info_val, True
+                    ))
             except Exception:
                 print("[QUEUE FULL] person webhook queue penuh")
 
