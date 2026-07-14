@@ -907,10 +907,12 @@ def vehicle_webhook_worker():
             }
             if line_name is not None:
                 if isinstance(line_name, dict):
-                    payload["line_name"]  = line_name.get("name", line_name.get("index"))
-                    payload["line_index"] = line_name.get("index")
+                    raw_name = line_name.get("name")
+                    raw_idx  = line_name.get("index")
+                    payload["line_name"]  = raw_name if raw_name and isinstance(raw_name, str) else f"Line {raw_idx}"
+                    payload["line_index"] = raw_idx
                 else:
-                    payload["line_name"]  = line_name
+                    payload["line_name"]  = str(line_name)
                     payload["line_index"] = line_name
 
         print(f"\n[WEBHOOK {cls_name.upper()}] {json.dumps({'url': WEBHOOK_URL, 'frame': frame_name, 'data': payload}, indent=2)}")
@@ -1380,23 +1382,22 @@ class CameraWorker:
                         break
 
         if crossed_line_idx is None and person_rois_scaled:
-            # Moderate padding to detect slightly cut-off limbs without false positives from distant bodies
-            pad = 15
-            inf_h, inf_w = view.shape[:2]
-            px1 = max(0, x1 - pad)
-            py1 = max(0, y1 - pad)
-            px2 = min(inf_w, x2 + pad)
-            py2 = min(inf_h, y2 + pad)
-
-            track_data.setdefault("last_roi_send_times", {})  # tidak dipakai lagi, placeholder
             now = time.time()
+            cx_person = (x1 + x2) // 2
+            cy_person = (y1 + y2) // 2
+            # Gunakan titik kaki (cx, y2) dan pusat (cx, cy) — lebih akurat untuk overhead/fisheye
+            foot_pt   = (float(cx_person), float(y2))
+            center_pt = (float(cx_person), float(cy_person))
 
             for item in person_rois_scaled:
-                roi_pts = item["roi"]
-                idx_roi = item["index"]
+                roi_pts  = np.array(item["roi"], dtype=np.int32)
+                idx_roi  = item["index"]
 
-                is_inside  = rect_intersects_polygon(px1, py1, px2, py2, roi_pts)
-                was_inside = track_data["last_roi_states"].get(idx_roi, False)
+                # Person dianggap di dalam ROI jika kaki ATAU pusat berada di dalam polygon
+                foot_inside   = cv2.pointPolygonTest(roi_pts, foot_pt,   False) >= 0
+                center_inside = cv2.pointPolygonTest(roi_pts, center_pt, False) >= 0
+                is_inside     = foot_inside or center_inside
+                was_inside    = track_data["last_roi_states"].get(idx_roi, False)
 
                 if is_inside:
                     track_data["last_roi_states"][idx_roi] = True
