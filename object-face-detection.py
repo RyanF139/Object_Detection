@@ -792,7 +792,8 @@ class ObjectTracker:
                 should_send  = (not t["sent_once"]) or (cooldown_ok and moved)
 
                 t["cx"], t["cy"] = cx, cy
-                t["history"].append((cx, cy))
+                history_pt = (cx, y2) if cls_name == "person" else (cx, cy)
+                t["history"].append(history_pt)
                 if len(t["history"]) > 30:
                     t["history"].pop(0)
                 t["x1"], t["y1"], t["x2"], t["y2"] = x1, y1, x2, y2
@@ -808,8 +809,9 @@ class ObjectTracker:
                 })
             else:
                 new_id = self._next_id()
+                initial_history_pt = (cx, y2) if cls_name == "person" else (cx, cy)
                 self.tracks[new_id] = {
-                    "history": [(cx, cy)], "id": new_id, "cls_name": cls_name,
+                    "history": [initial_history_pt], "id": new_id, "cls_name": cls_name,
                     "cx": cx, "cy": cy, "x1": x1, "y1": y1, "x2": x2, "y2": y2,
                     "miss": 0, "last_sent": now, "sent_once": True,
                     "matched": True, "last_cross_dir": None,
@@ -1346,25 +1348,16 @@ class CameraWorker:
             cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, WIDTH_LINE,
         )
 
-        cx, cy = bbox_center(x1, y1, x2, y2)
-
-        # Enforce global ROI check only if using person_lines without custom person_rois
-        if person_lines_scaled and not person_rois_scaled:
-            if not self.is_inside_roi(cx, cy, roi_scaled):
-                return False
-
         track_data = self.tracker.tracks.get(obj_id)
         if track_data is None:
             return False
         track_data.setdefault("last_cross_dirs", {})
         track_data.setdefault("last_roi_states", {})
 
-        crossed_line_idx = None
-        crossed_line_name = None
-        triggered_roi_idx = None
-        triggered_roi_name = None
-        direction = None
+        # Pemicu line dan ROI diproses masing-masing secara mandiri
+        has_event = False
 
+        # --- A. PERSON LINE DETECTION ---
         if person_lines_scaled:
             for item in person_lines_scaled:
                 line_pts = item["line"]
@@ -1376,28 +1369,33 @@ class CameraWorker:
                     last_dir = track_data["last_cross_dirs"].get(idx_line)
                     if dir_cross != last_dir:
                         track_data["last_cross_dirs"][idx_line] = dir_cross
-                        crossed_line_idx = idx_line
-                        crossed_line_name = item.get("name", idx_line)
-                        direction = dir_cross
+                        
+                        # Kirim event line detection langsung
+                        print(f"[PERSON LINE] ID={obj_id} dir={dir_cross} | line_idx={idx_line} | cam={self.cid}")
+                        crop_name = iso_name("crop", f"{cls_name}_line{idx_line}", ts_iso, obj_id, dir_cross)
+                        frame_name = iso_name("frame", f"{cls_name}_line{idx_line}", ts_iso, obj_id, dir_cross)
+                        self._trigger_person_webhook(
+                            ox1, oy1, ox2, oy2, orig_w, orig_h, frame_original,
+                            crop_name, frame_name, ts_iso, conf, cls_name, obj_id, obj["is_new"],
+                            dir_cross, {"index": idx_line, "name": item.get("name", idx_line)}
+                        )
+                        has_event = True
                         break
 
-        if crossed_line_idx is None and person_rois_scaled:
-            now = time.time()
+        # --- B. PERSON ROI DETECTION ---
+        if person_rois_scaled:
+            now_time = time.time()
             cx_person = (x1 + x2) // 2
-            cy_person = (y1 + y2) // 2
-            # Gunakan titik kaki (cx, y2) dan pusat (cx, cy) — lebih akurat untuk overhead/fisheye
-            foot_pt   = (float(cx_person), float(y2))
-            center_pt = (float(cx_person), float(cy_person))
+            # Gunakan HANYA titik kaki (cx, y2) agar tubuh bagian atas di luar ROI tidak memicu alarm
+            foot_pt = (float(cx_person), float(y2))
 
             for item in person_rois_scaled:
-                roi_pts  = np.array(item["roi"], dtype=np.int32)
-                idx_roi  = item["index"]
+                roi_pts = np.array(item["roi"], dtype=np.int32)
+                idx_roi = item["index"]
 
-                # Person dianggap di dalam ROI jika kaki ATAU pusat berada di dalam polygon
-                foot_inside   = cv2.pointPolygonTest(roi_pts, foot_pt,   False) >= 0
-                center_inside = cv2.pointPolygonTest(roi_pts, center_pt, False) >= 0
-                is_inside     = foot_inside or center_inside
-                was_inside    = track_data["last_roi_states"].get(idx_roi, False)
+                # Cek apakah kaki berada di dalam polygon ROI
+                is_inside = cv2.pointPolygonTest(roi_pts, foot_pt, False) >= 0
+                was_inside = track_data["last_roi_states"].get(idx_roi, False)
 
                 if is_inside:
                     track_data["last_roi_states"][idx_roi] = True
@@ -1405,31 +1403,32 @@ class CameraWorker:
                     # Cooldown diambil dari level kamera agar tidak hilang saat obj_id berganti
                     last_send = self._roi_send_times.get(idx_roi, 0)
                     # Kirim hanya saat baru masuk (was_inside=False) DAN cooldown kamera sudah lewat
-                    if not was_inside and (now - last_send >= 5.0):
-                        self._roi_send_times[idx_roi] = now
-                        triggered_roi_idx  = idx_roi
-                        triggered_roi_name = item.get("name", idx_roi)
-                        direction = "IN"
+                    if not was_inside and (now_time - last_send >= 5.0):
+                        self._roi_send_times[idx_roi] = now_time
+                        
+                        # Kirim event ROI detection langsung
+                        print(f"[PERSON ROI] ID={obj_id} roi_idx={idx_roi} | cam={self.cid}")
+                        crop_name = iso_name("crop", f"{cls_name}_roi{idx_roi}", ts_iso, obj_id, "IN")
+                        frame_name = iso_name("frame", f"{cls_name}_roi{idx_roi}", ts_iso, obj_id, "IN")
+                        self._trigger_person_webhook(
+                            ox1, oy1, ox2, oy2, orig_w, orig_h, frame_original,
+                            crop_name, frame_name, ts_iso, conf, cls_name, obj_id, obj["is_new"],
+                            None, {"index": idx_roi, "name": item.get("name", idx_roi)}, is_roi=True
+                        )
+                        has_event = True
                         break
                 else:
                     # Reset state masuk/keluar per-track
-                    # last_roi_send_times kamera TIDAK direset agar cooldown tetap berlaku
                     track_data["last_roi_states"][idx_roi] = False
 
-        if crossed_line_idx is None and triggered_roi_idx is None:
-            return False
+        if has_event:
+            self.last_person_time = time.time()
+            return True
+        return False
 
-        self.last_person_time = time.time()
-        
-        if crossed_line_idx is not None:
-            print(f"[PERSON] ID={obj_id} dir={direction} | line_idx={crossed_line_idx} | cam={self.cid}")
-            crop_name  = iso_name("crop",  f"{cls_name}_line{crossed_line_idx}", ts_iso, obj_id, direction)
-            frame_name = iso_name("frame", f"{cls_name}_line{crossed_line_idx}", ts_iso, obj_id, direction)
-        else:
-            print(f"[PERSON ROI] ID={obj_id} roi_idx={triggered_roi_idx} | cam={self.cid}")
-            crop_name  = iso_name("crop",  f"{cls_name}_roi{triggered_roi_idx}", ts_iso, obj_id, "IN")
-            frame_name = iso_name("frame", f"{cls_name}_roi{triggered_roi_idx}", ts_iso, obj_id, "IN")
-
+    def _trigger_person_webhook(self, ox1, oy1, ox2, oy2, orig_w, orig_h, frame_original,
+                                crop_name, frame_name, ts_iso, conf, cls_name, obj_id, is_new,
+                                direction, info_val, is_roi=False):
         cx1, cy1, cx2, cy2 = expand_crop_bbox(ox1, oy1, ox2, oy2, orig_w, orig_h, CROP_PADDING)
         crop_original      = frame_original[cy1:cy2, cx1:cx2]
         crop_save          = prepare_for_save(crop_original)
@@ -1451,25 +1450,21 @@ class CameraWorker:
 
         if WEBHOOK_URL:
             try:
-                if crossed_line_idx is not None:
-                    # Line crossing event — include direction and line info
-                    line_name_val = {"index": crossed_line_idx, "name": crossed_line_name}
+                if not is_roi:
                     webhook_queue.put_nowait((
                         crop_bytes, frame_clean_bytes, crop_name, frame_name,
                         self.name_camera, ts_iso,
                         (ox1, oy1, ox2, oy2), conf, cls_name,
                         self.cid, self.client_id,
-                        obj_id, obj["is_new"], direction, line_name_val
+                        obj_id, is_new, direction, info_val
                     ))
                 else:
-                    # ROI entry event — 16-element tuple (True flag = penanda ROI)
-                    roi_info_val = {"index": triggered_roi_idx, "name": triggered_roi_name}
                     webhook_queue.put_nowait((
                         crop_bytes, frame_clean_bytes, crop_name, frame_name,
                         self.name_camera, ts_iso,
                         (ox1, oy1, ox2, oy2), conf, cls_name,
                         self.cid, self.client_id,
-                        obj_id, obj["is_new"], None, roi_info_val, True
+                        obj_id, is_new, None, info_val, True
                     ))
             except Exception:
                 print("[QUEUE FULL] person webhook queue penuh")
