@@ -166,9 +166,10 @@ FRAME_FPS    = int(os.getenv("FRAME_FPS",    12))
 IDLE_FPS     = int(os.getenv("IDLE_FPS",      3))
 IDLE_TIMEOUT = int(os.getenv("IDLE_TIMEOUT", 10))
 
-TRACK_MAX_DIST = int(os.getenv("TRACK_MAX_DIST", 80))
-TRACK_MAX_MISS = int(os.getenv("TRACK_MAX_MISS", 20))
-TRACK_MOVE_THR = int(os.getenv("TRACK_MOVE_THR", 40))
+TRACK_MAX_DIST        = int(os.getenv("TRACK_MAX_DIST", 80))
+TRACK_PERSON_MAX_DIST = int(os.getenv("TRACK_PERSON_MAX_DIST", 35))
+TRACK_MAX_MISS        = int(os.getenv("TRACK_MAX_MISS", 20))
+TRACK_MOVE_THR        = int(os.getenv("TRACK_MOVE_THR", 40))
 
 ENABLE_VIEW    = os.getenv("ENABLE_VIEW",    "true").lower() == "true"
 DISPLAY_WIDTH  = int(os.getenv("DISPLAY_WIDTH",  1200))
@@ -777,8 +778,8 @@ class ObjectTracker:
             for tid, t in self.tracks.items():
                 if t["cls_name"] != cls_name:
                     continue
-                d = center_dist((cx, cy), (t["cx"], t["cy"]))
-                if d < best_dist and d < TRACK_MAX_DIST:
+                limit_dist = TRACK_PERSON_MAX_DIST if cls_name == "person" else TRACK_MAX_DIST
+                if d < best_dist and d < limit_dist:
                     best_dist = d
                     best_id   = tid
 
@@ -1402,8 +1403,8 @@ class CameraWorker:
 
                     # Cooldown diambil dari level kamera agar tidak hilang saat obj_id berganti
                     last_send = self._roi_send_times.get(idx_roi, 0)
-                    # Kirim hanya saat baru masuk (was_inside=False) DAN cooldown kamera sudah lewat
-                    if not was_inside and (now_time - last_send >= 5.0):
+                    # Kirim terus-menerus selama di dalam ROI (cooldown 5 detik per event)
+                    if now_time - last_send >= 5.0:
                         self._roi_send_times[idx_roi] = now_time
                         
                         # Kirim event ROI detection langsung
