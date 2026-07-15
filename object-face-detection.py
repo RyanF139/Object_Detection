@@ -779,6 +779,7 @@ class ObjectTracker:
                 if t["cls_name"] != cls_name:
                     continue
                 limit_dist = TRACK_PERSON_MAX_DIST if cls_name == "person" else TRACK_MAX_DIST
+                d = center_dist((cx, cy), (t["cx"], t["cy"]))
                 if d < best_dist and d < limit_dist:
                     best_dist = d
                     best_id   = tid
