@@ -1268,8 +1268,6 @@ class CameraWorker:
 
         if not self.vehicle_enabled or not self.line_enabled:
             return False
-        if not self.is_inside_roi(cx, cy, roi_scaled):
-            return False
 
         track_data = self.tracker.tracks.get(obj_id)
         if track_data is None:
@@ -1278,6 +1276,10 @@ class CameraWorker:
 
         direction = check_line_cross(track_data["history"], line_scaled, self.line_in_dir)
         if direction is None or direction == track_data["last_cross_dir"]:
+            return False
+
+        # Syarat ROI: Kendaraan harus berada di dalam ROI saat di-capture
+        if not self.is_inside_roi(cx, cy, roi_scaled):
             return False
 
         track_data["last_cross_dir"] = direction

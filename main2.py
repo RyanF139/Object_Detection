@@ -751,10 +751,6 @@ class CameraWorker:
             if not self.line_enabled:
                 return False
 
-            # ROI wajib aktif saat vehicle_enabled = True
-            if not self.is_inside_roi(cx, cy, roi_scaled):
-                return False
-
             track_data = self.tracker.tracks.get(obj_id)
             if track_data is None:
                 return False
@@ -772,6 +768,10 @@ class CameraWorker:
 
             # Crossing sama dengan yang sudah dikirim → skip duplikat
             if direction == track_data["last_cross_dir"]:
+                return False
+
+            # Syarat ROI: Kendaraan harus berada di dalam ROI saat di-capture
+            if not self.is_inside_roi(cx, cy, roi_scaled):
                 return False
 
             # Crossing baru → update dan lanjut kirim
