@@ -1333,19 +1333,18 @@ class CameraWorker:
 
         # 2. Cek apakah titik tengah kendaraan baru saja menyeberangi garis pada frame ini
         direction = is_just_crossed_line(track_data["history"], line_scaled, self.line_in_dir)
-        if direction is not None:
-            # Jika menyeberangi garis SEBELUM pernah mengunjungi ROI, tandai line_crossed_first dan tolak
-            if not track_data.get("roi_visited", False):
-                track_data["line_crossed_first"] = True
-                return False
-
         if direction is None or direction == track_data["last_cross_dir"]:
             return False
 
-        if track_data.get("line_crossed_first", False):
-            return False
+        # 3. Syarat Utama Urutan: Titik tengah kendaraan HARUS berada di dalam ROI pada frame SEBELUM menyeberangi garis (Urutan ROI -> LINE)
+        if len(track_data["history"]) >= 2:
+            px_prev, py_prev = track_data["history"][-2]
+            prev_in_roi = cv2.pointPolygonTest(roi_scaled, (float(px_prev), float(py_prev)), True) >= 0
+            if not prev_in_roi:
+                # Pergerakan LINE -> ROI (Berada di luar ROI sebelum lewat garis) -> TOLAK TOTAL!
+                return False
 
-        # 3. Syarat Event: Kendaraan harus pernah di-capture saat berada di dalam ROI
+        # 4. Syarat Event: Kendaraan harus pernah di-capture saat berada di dalam ROI
         roi_cap = track_data.get("roi_capture")
         if roi_cap is None:
             return False
