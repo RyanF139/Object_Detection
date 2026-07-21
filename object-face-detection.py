@@ -462,6 +462,36 @@ def check_line_cross(history, line_pts, line_in_dir):
     return last_direction
 
 
+def line_dist_px(px, py, lx1, ly1, lx2, ly2):
+    line_len = math.hypot(lx2 - lx1, ly2 - ly1)
+    if line_len == 0:
+        return 0.0
+    return point_side_of_line(px, py, lx1, ly1, lx2, ly2) / line_len
+
+
+def is_just_crossed_line(history, line_pts, line_in_dir, margin=10.0):
+    if len(history) < 2:
+        return None
+    (lx1, ly1), (lx2, ly2) = line_pts
+    px_prev, py_prev = history[-2]
+    px_curr, py_curr = history[-1]
+
+    prev_dist = line_dist_px(px_prev, py_prev, lx1, ly1, lx2, ly2)
+    curr_dist = line_dist_px(px_curr, py_curr, lx1, ly1, lx2, ly2)
+
+    # Wajib melintasi zona mati (deadband) secara bersih dari > margin ke < -margin
+    crossed_a_to_b = (prev_dist > margin and curr_dist < -margin)
+    crossed_b_to_a = (prev_dist < -margin and curr_dist > margin)
+
+    if not crossed_a_to_b and not crossed_b_to_a:
+        return None
+
+    if line_in_dir == "A":
+        return "IN" if crossed_a_to_b else "OUT"
+    else:
+        return "IN" if crossed_b_to_a else "OUT"
+
+
 def scale_roi(roi_ref, inf_w, inf_h):
     ref_h = int(TARGET_MAX_WIDTH * inf_h / inf_w) if inf_w > 0 else inf_h
     sx = inf_w / TARGET_MAX_WIDTH
@@ -1274,29 +1304,46 @@ class CameraWorker:
             return False
         track_data.setdefault("last_cross_dir", None)
 
-        # 1. Simpan/perbarui cache capture saat kendaraan berada di posisi TERDALAM di ROI
+        # 1. Simpan/perbarui cache capture saat kendaraan berada di posisi TERDALAM di ROI (hanya jika ROI dikunjungi sebelum Line)
         dist_roi = cv2.pointPolygonTest(roi_scaled, (float(cx), float(cy)), True)
-        if dist_roi >= 0 and dist_roi > track_data.get("best_roi_dist", -1.0):
-            cx1, cy1, cx2, cy2 = expand_crop_bbox(ox1, oy1, ox2, oy2, orig_w, orig_h, CROP_PADDING)
-            crop_original      = frame_original[cy1:cy2, cx1:cx2]
-            crop_save          = prepare_for_save(crop_original)
-            frame_save         = prepare_for_save(frame_original)
+        if dist_roi >= 0:
+            if not track_data.get("line_crossed_first", False):
+                track_data["roi_visited"] = True
+                if dist_roi > track_data.get("best_roi_dist", -1.0):
+                    cx1, cy1, cx2, cy2 = expand_crop_bbox(ox1, oy1, ox2, oy2, orig_w, orig_h, CROP_PADDING)
+                    crop_original      = frame_original[cy1:cy2, cx1:cx2]
+                    crop_save          = prepare_for_save(crop_original)
+                    frame_save         = prepare_for_save(frame_original)
 
-            _, crop_jpg       = cv2.imencode(".jpg", crop_save)
-            _, frame_jpg      = cv2.imencode(".jpg", frame_save)
+                    _, crop_jpg       = cv2.imencode(".jpg", crop_save)
+                    _, frame_jpg      = cv2.imencode(".jpg", frame_save)
 
-            track_data["best_roi_dist"] = dist_roi
-            track_data["roi_capture"]   = {
-                "crop_bytes": crop_jpg.tobytes(),
-                "frame_clean_bytes": frame_jpg.tobytes(),
-                "bbox_orig": (ox1, oy1, ox2, oy2),
-                "conf": conf,
-                "ts_iso": ts_iso,
-            }
+                    track_data["best_roi_dist"] = dist_roi
+                    track_data["roi_capture"]   = {
+                        "crop_bytes": crop_jpg.tobytes(),
+                        "frame_clean_bytes": frame_jpg.tobytes(),
+                        "bbox_orig": (ox1, oy1, ox2, oy2),
+                        "conf": conf,
+                        "ts_iso": ts_iso,
+                    }
 
-        # 2. Cek apakah kendaraan menyeberangi garis
-        direction = check_line_cross(track_data["history"], line_scaled, self.line_in_dir)
-        if direction is None or direction == track_data["last_cross_dir"]:
+        # Kunci single webhook per track ID kendaraan
+        if track_data.get("line_sent", False):
+            return False
+
+        # 2. Cek apakah titik tengah kendaraan baru saja menyeberangi garis pada frame ini
+        detected_dir = is_just_crossed_line(track_data["history"], line_scaled, self.line_in_dir)
+        if detected_dir is not None:
+            # Jika menyeberangi garis SEBELUM pernah mengunjungi ROI, tandai line_crossed_first dan tolak
+            if not track_data.get("roi_visited", False):
+                track_data["line_crossed_first"] = True
+                return False
+            # Urutan ROI -> Line dipastikan selalu arah IN
+            direction = "IN"
+        else:
+            return False
+
+        if track_data.get("line_crossed_first", False):
             return False
 
         # 3. Syarat Event: Kendaraan harus pernah di-capture saat berada di dalam ROI
@@ -1305,6 +1352,7 @@ class CameraWorker:
             return False
 
         track_data["last_cross_dir"] = direction
+        track_data["line_sent"]       = True
         print(f"[VEHICLE] ID={obj_id} {cls_name} dir={direction} | cam={self.cid}")
 
         crop_bytes        = roi_cap["crop_bytes"]
