@@ -755,6 +755,22 @@ class CameraWorker:
             if track_data is None:
                 return False
 
+            # 1. Simpan/perbarui cache capture saat kendaraan berada di dalam ROI
+            if self.is_inside_roi(cx, cy, roi_scaled):
+                cx1, cy1, cx2, cy2 = expand_crop_bbox(ox1, oy1, ox2, oy2, orig_w, orig_h)
+                crop_original      = frame_original[cy1:cy2, cx1:cx2]
+                crop_save          = prepare_for_save(crop_original)
+                frame_save         = prepare_for_save(frame_original)
+
+                _, crop_jpg       = cv2.imencode(".jpg", crop_save)
+                _, frame_jpg      = cv2.imencode(".jpg", frame_save)
+
+                track_data["roi_capture"] = {
+                    "crop_bytes": crop_jpg.tobytes(),
+                    "frame_clean_bytes": frame_jpg.tobytes(),
+                    "ts_iso": ts_iso,
+                }
+
             # Pastikan last_cross_dir ada (backward compat)
             track_data.setdefault("last_cross_dir", None)
 
@@ -770,8 +786,9 @@ class CameraWorker:
             if direction == track_data["last_cross_dir"]:
                 return False
 
-            # Syarat ROI: Kendaraan harus berada di dalam ROI saat di-capture
-            if not self.is_inside_roi(cx, cy, roi_scaled):
+            # 2. Syarat Event: Kendaraan harus pernah di-capture saat berada di dalam ROI
+            roi_cap = track_data.get("roi_capture")
+            if roi_cap is None:
                 return False
 
             # Crossing baru → update dan lanjut kirim

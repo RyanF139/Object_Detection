@@ -1274,29 +1274,45 @@ class CameraWorker:
             return False
         track_data.setdefault("last_cross_dir", None)
 
+        # 1. Simpan/perbarui cache capture saat kendaraan berada di dalam ROI
+        if self.is_inside_roi(cx, cy, roi_scaled):
+            cx1, cy1, cx2, cy2 = expand_crop_bbox(ox1, oy1, ox2, oy2, orig_w, orig_h, CROP_PADDING)
+            crop_original      = frame_original[cy1:cy2, cx1:cx2]
+            crop_save          = prepare_for_save(crop_original)
+            frame_save         = prepare_for_save(frame_original)
+
+            _, crop_jpg       = cv2.imencode(".jpg", crop_save)
+            _, frame_jpg      = cv2.imencode(".jpg", frame_save)
+
+            track_data["roi_capture"] = {
+                "crop_bytes": crop_jpg.tobytes(),
+                "frame_clean_bytes": frame_jpg.tobytes(),
+                "bbox_orig": (ox1, oy1, ox2, oy2),
+                "conf": conf,
+                "ts_iso": ts_iso,
+            }
+
+        # 2. Cek apakah kendaraan menyeberangi garis
         direction = check_line_cross(track_data["history"], line_scaled, self.line_in_dir)
         if direction is None or direction == track_data["last_cross_dir"]:
             return False
 
-        # Syarat ROI: Kendaraan harus berada di dalam ROI saat di-capture
-        if not self.is_inside_roi(cx, cy, roi_scaled):
+        # 3. Syarat Event: Kendaraan harus pernah di-capture saat berada di dalam ROI
+        roi_cap = track_data.get("roi_capture")
+        if roi_cap is None:
             return False
 
         track_data["last_cross_dir"] = direction
         print(f"[VEHICLE] ID={obj_id} {cls_name} dir={direction} | cam={self.cid}")
 
-        cx1, cy1, cx2, cy2 = expand_crop_bbox(ox1, oy1, ox2, oy2, orig_w, orig_h, CROP_PADDING)
-        crop_original      = frame_original[cy1:cy2, cx1:cx2]
-        crop_save          = prepare_for_save(crop_original)
-        frame_save         = prepare_for_save(frame_original)
+        crop_bytes        = roi_cap["crop_bytes"]
+        frame_clean_bytes = roi_cap["frame_clean_bytes"]
+        cap_ox1, cap_oy1, cap_ox2, cap_oy2 = roi_cap["bbox_orig"]
+        cap_conf          = roi_cap["conf"]
+        cap_ts            = roi_cap["ts_iso"]
 
-        _, crop_jpg       = cv2.imencode(".jpg", crop_save)
-        crop_bytes        = crop_jpg.tobytes()
-        _, frame_jpg      = cv2.imencode(".jpg", frame_save)
-        frame_clean_bytes = frame_jpg.tobytes()
-
-        crop_name  = iso_name("crop",  cls_name, ts_iso, obj_id, direction)
-        frame_name = iso_name("frame", cls_name, ts_iso, obj_id, direction)
+        crop_name  = iso_name("crop",  cls_name, cap_ts, obj_id, direction)
+        frame_name = iso_name("frame", cls_name, cap_ts, obj_id, direction)
 
         if self.save_image_vehicle:
             try:
@@ -1313,8 +1329,8 @@ class CameraWorker:
             try:
                 webhook_queue.put_nowait((
                     crop_bytes, frame_clean_bytes, crop_name, frame_name,
-                    self.name_camera, ts_iso,
-                    (ox1, oy1, ox2, oy2), conf, cls_name,
+                    self.name_camera, cap_ts,
+                    (cap_ox1, cap_oy1, cap_ox2, cap_oy2), cap_conf, cls_name,
                     self.cid, self.client_id,
                     obj_id, obj["is_new"], direction,
                 ))
