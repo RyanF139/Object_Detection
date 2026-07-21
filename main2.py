@@ -755,8 +755,9 @@ class CameraWorker:
             if track_data is None:
                 return False
 
-            # 1. Simpan/perbarui cache capture saat kendaraan berada di dalam ROI
-            if self.is_inside_roi(cx, cy, roi_scaled):
+            # 1. Simpan/perbarui cache capture saat kendaraan berada di posisi TERDALAM di ROI
+            dist_roi = cv2.pointPolygonTest(roi_scaled, (float(cx), float(cy)), True)
+            if dist_roi >= 0 and dist_roi > track_data.get("best_roi_dist", -1.0):
                 cx1, cy1, cx2, cy2 = expand_crop_bbox(ox1, oy1, ox2, oy2, orig_w, orig_h)
                 crop_original      = frame_original[cy1:cy2, cx1:cx2]
                 crop_save          = prepare_for_save(crop_original)
@@ -765,7 +766,8 @@ class CameraWorker:
                 _, crop_jpg       = cv2.imencode(".jpg", crop_save)
                 _, frame_jpg      = cv2.imencode(".jpg", frame_save)
 
-                track_data["roi_capture"] = {
+                track_data["best_roi_dist"] = dist_roi
+                track_data["roi_capture"]   = {
                     "crop_bytes": crop_jpg.tobytes(),
                     "frame_clean_bytes": frame_jpg.tobytes(),
                     "ts_iso": ts_iso,
