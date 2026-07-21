@@ -1332,15 +1332,14 @@ class CameraWorker:
             return False
 
         # 2. Cek apakah titik tengah kendaraan baru saja menyeberangi garis pada frame ini
-        detected_dir = is_just_crossed_line(track_data["history"], line_scaled, self.line_in_dir)
-        if detected_dir is not None:
+        direction = is_just_crossed_line(track_data["history"], line_scaled, self.line_in_dir)
+        if direction is not None:
             # Jika menyeberangi garis SEBELUM pernah mengunjungi ROI, tandai line_crossed_first dan tolak
             if not track_data.get("roi_visited", False):
                 track_data["line_crossed_first"] = True
                 return False
-            # Urutan ROI -> Line dipastikan selalu arah IN
-            direction = "IN"
-        else:
+
+        if direction is None or direction == track_data["last_cross_dir"]:
             return False
 
         if track_data.get("line_crossed_first", False):

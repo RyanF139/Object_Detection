@@ -942,15 +942,15 @@ class CameraWorker:
 
             track_data.setdefault("last_cross_dir", None)
 
-            detected_dir = is_just_crossed_line(
+            direction = is_just_crossed_line(
                 track_data["history"], line_scaled, self.line_in_dir
             )
-            if detected_dir is not None:
+            if direction is not None:
                 if not track_data.get("roi_visited", False):
                     track_data["line_crossed_first"] = True
                     return False
-                direction = "IN"
-            else:
+
+            if direction is None:
                 return False
             if direction == track_data["last_cross_dir"]:
                 return False
