@@ -166,9 +166,9 @@ FRAME_FPS    = int(os.getenv("FRAME_FPS",    12))
 IDLE_FPS     = int(os.getenv("IDLE_FPS",      3))
 IDLE_TIMEOUT = int(os.getenv("IDLE_TIMEOUT", 10))
 
-TRACK_MAX_DIST        = int(os.getenv("TRACK_MAX_DIST", 80))
+TRACK_MAX_DIST        = int(os.getenv("TRACK_MAX_DIST", 250))
 TRACK_PERSON_MAX_DIST = int(os.getenv("TRACK_PERSON_MAX_DIST", 35))
-TRACK_MAX_MISS        = int(os.getenv("TRACK_MAX_MISS", 20))
+TRACK_MAX_MISS        = int(os.getenv("TRACK_MAX_MISS", 100))
 TRACK_MOVE_THR        = int(os.getenv("TRACK_MOVE_THR", 40))
 
 ENABLE_VIEW    = os.getenv("ENABLE_VIEW",    "true").lower() == "true"
@@ -225,7 +225,7 @@ CLASS_CONFIG = {
         "conf":     float(os.getenv("CAR_CONF",      0.40)),
         "color":    tuple(map(int, os.getenv("CAR_COLOR",    "255,0,0").split(","))),
         "min_size": int(os.getenv("CAR_MIN_SIZE",    5000)),
-        "max_size": int(os.getenv("CAR_MAX_SIZE",    200000)),
+        "max_size": int(os.getenv("CAR_MAX_SIZE",    1000000)),
         "cooldown": int(os.getenv("CAR_COOLDOWN",    10)),
     },
     "bus": {
@@ -246,7 +246,7 @@ CLASS_CONFIG = {
         "conf":     float(os.getenv("MOTORCYCLE_CONF",    0.35)),
         "color":    tuple(map(int, os.getenv("MOTORCYCLE_COLOR", "0,255,255").split(","))),
         "min_size": int(os.getenv("MOTORCYCLE_MIN_SIZE",  1000)),
-        "max_size": int(os.getenv("MOTORCYCLE_MAX_SIZE",  90000)),
+        "max_size": int(os.getenv("MOTORCYCLE_MAX_SIZE",  500000)),
         "cooldown": int(os.getenv("MOTORCYCLE_COOLDOWN",  10)),
     },
 }
@@ -824,7 +824,7 @@ class ObjectTracker:
                 should_send  = (not t["sent_once"]) or (cooldown_ok and moved)
 
                 t["cx"], t["cy"] = cx, cy
-                history_pt = (cx, y2) if cls_name == "person" else (cx, cy)
+                history_pt = (cx, y2)
                 t["history"].append(history_pt)
                 if len(t["history"]) > 30:
                     t["history"].pop(0)
@@ -841,7 +841,7 @@ class ObjectTracker:
                 })
             else:
                 new_id = self._next_id()
-                initial_history_pt = (cx, y2) if cls_name == "person" else (cx, cy)
+                initial_history_pt = (cx, y2)
                 self.tracks[new_id] = {
                     "history": [initial_history_pt], "id": new_id, "cls_name": cls_name,
                     "cx": cx, "cy": cy, "x1": x1, "y1": y1, "x2": x2, "y2": y2,
@@ -1304,6 +1304,17 @@ class CameraWorker:
             return False
         track_data.setdefault("last_cross_dir", None)
 
+        if "first_check" not in track_data:
+            track_data["first_check"] = True
+            (lx1, ly1), (lx2, ly2) = line_scaled
+            roi_center_x = np.mean(roi_scaled[:, 0])
+            roi_center_y = np.mean(roi_scaled[:, 1])
+            roi_side = point_side_of_line(roi_center_x, roi_center_y, lx1, ly1, lx2, ly2)
+            veh_side = point_side_of_line(cx, y2, lx1, ly1, lx2, ly2)
+            # Jika sisi ROI dan sisi kendaraan berbeda tanda (+/-), berarti kendaraan sudah melewati garis
+            if roi_side * veh_side < 0:
+                track_data["line_crossed_first"] = True
+
         # 1. Simpan/perbarui cache capture saat kendaraan berada di posisi TERDALAM di ROI (hanya jika ROI dikunjungi sebelum Line)
         dist_roi = cv2.pointPolygonTest(roi_scaled, (float(cx), float(cy)), True)
         if dist_roi >= 0:
@@ -1312,39 +1323,46 @@ class CameraWorker:
                 if dist_roi > track_data.get("best_roi_dist", -1.0):
                     cx1, cy1, cx2, cy2 = expand_crop_bbox(ox1, oy1, ox2, oy2, orig_w, orig_h, CROP_PADDING)
                     crop_original      = frame_original[cy1:cy2, cx1:cx2]
-                    crop_save          = prepare_for_save(crop_original)
-                    frame_save         = prepare_for_save(frame_original)
+                    if crop_original.size > 0:
+                        crop_save          = prepare_for_save(crop_original)
+                        frame_save         = prepare_for_save(frame_original)
 
-                    _, crop_jpg       = cv2.imencode(".jpg", crop_save)
-                    _, frame_jpg      = cv2.imencode(".jpg", frame_save)
+                        _, crop_jpg       = cv2.imencode(".jpg", crop_save)
+                        _, frame_jpg      = cv2.imencode(".jpg", frame_save)
 
-                    track_data["best_roi_dist"] = dist_roi
-                    track_data["roi_capture"]   = {
-                        "crop_bytes": crop_jpg.tobytes(),
-                        "frame_clean_bytes": frame_jpg.tobytes(),
-                        "bbox_orig": (ox1, oy1, ox2, oy2),
-                        "conf": conf,
-                        "ts_iso": ts_iso,
-                    }
+                        track_data["best_roi_dist"] = dist_roi
+                        track_data["roi_capture"]   = {
+                            "crop_bytes": crop_jpg.tobytes(),
+                            "frame_clean_bytes": frame_jpg.tobytes(),
+                            "bbox_orig": (ox1, oy1, ox2, oy2),
+                            "conf": conf,
+                            "ts_iso": ts_iso,
+                        }
 
         # Kunci single webhook per track ID kendaraan
         if track_data.get("line_sent", False):
             return False
 
         # 2. Cek apakah titik tengah kendaraan baru saja menyeberangi garis pada frame ini
-        direction = is_just_crossed_line(track_data["history"], line_scaled, self.line_in_dir)
+        direction = is_just_crossed_line(track_data["history"], line_scaled, self.line_in_dir, margin=2.0)
+        if direction is not None:
+            # Jika melintasi garis sebelum pernah mengunjungi ROI, tandai line_crossed_first
+            if not track_data.get("roi_visited", False):
+                track_data["line_crossed_first"] = True
+                return False
+
         if direction is None or direction == track_data["last_cross_dir"]:
             return False
 
-        # 3. Syarat Utama Urutan: Titik tengah kendaraan HARUS berada di dalam ROI pada frame SEBELUM menyeberangi garis (Urutan ROI -> LINE)
-        if len(track_data["history"]) >= 2:
-            px_prev, py_prev = track_data["history"][-2]
-            prev_in_roi = cv2.pointPolygonTest(roi_scaled, (float(px_prev), float(py_prev)), True) >= 0
-            if not prev_in_roi:
-                # Pergerakan LINE -> ROI (Berada di luar ROI sebelum lewat garis) -> TOLAK TOTAL!
-                return False
+        # Tolak jika pernah melintasi garis duluan sebelum ROI
+        if track_data.get("line_crossed_first", False):
+            return False
 
-        # 4. Syarat Event: Kendaraan harus pernah di-capture saat berada di dalam ROI
+        # Wajib pernah mengunjungi ROI sebelum melintasi garis
+        if not track_data.get("roi_visited", False):
+            return False
+
+        # 3. Syarat Event: Kendaraan harus pernah di-capture saat berada di dalam ROI
         roi_cap = track_data.get("roi_capture")
         if roi_cap is None:
             return False
@@ -1499,6 +1517,8 @@ class CameraWorker:
                                 direction, info_val, is_roi=False):
         cx1, cy1, cx2, cy2 = expand_crop_bbox(ox1, oy1, ox2, oy2, orig_w, orig_h, CROP_PADDING)
         crop_original      = frame_original[cy1:cy2, cx1:cx2]
+        if crop_original.size == 0:
+            return False
         crop_save          = prepare_for_save(crop_original)
         frame_save         = prepare_for_save(frame_original)
 
