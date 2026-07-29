@@ -4,7 +4,6 @@ requests
 onnxruntime-gpu==1.18.0
 python-dotenv
 nvidia-cublas-cu11
-nvidia-cudnn-cu11
 nvidia-cuda-runtime-cu11
 nvidia-cufft-cu11
 nvidia-curand-cu11

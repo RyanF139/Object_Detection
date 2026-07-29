@@ -5,13 +5,17 @@ WORKDIR /app
 ENV PYTHONUNBUFFERED=1
 ENV CONTAINER_NAME=object-detection-onnx
 
-RUN apt-get update && apt-get install -y \
+RUN apt-get update && apt-get install -y wget gnupg2 \
+    && wget https://developer.download.nvidia.com/compute/cuda/repos/debian11/x86_64/cuda-keyring_1.1-1_all.deb \
+    && dpkg -i cuda-keyring_1.1-1_all.deb \
+    && apt-get update && apt-get install -y \
     libgl1 \
     libglib2.0-0 \
     build-essential \
     ffmpeg \
     patchelf \
-    && rm -rf /var/lib/apt/lists/*
+    libcudnn8=8.9.7.29-1+cuda11.8 \
+    && rm -rf /var/lib/apt/lists/* cuda-keyring_1.1-1_all.deb
 
 COPY requirements.txt .
 
@@ -19,8 +23,6 @@ RUN pip install --no-cache-dir -r requirements.txt \
     && pip uninstall -y onnxruntime onnxruntime-gpu || true \
     && pip install --no-cache-dir --force-reinstall onnxruntime-gpu==1.18.0 \
     && pip install --no-cache-dir --force-reinstall numpy==1.26.4 \
-    && ln -s /usr/local/lib/python3.10/site-packages/nvidia/cudnn/lib/libcudnn.so.9 /usr/local/lib/python3.10/site-packages/nvidia/cudnn/lib/libcudnn.so.8 || true \
-    && ln -s /usr/local/lib/python3.10/site-packages/nvidia/cudnn/lib/libcudnn.so.9.1.0.70 /usr/local/lib/python3.10/site-packages/nvidia/cudnn/lib/libcudnn.so.8 || true \
     && patchelf --clear-execstack /usr/local/lib/python3.10/site-packages/onnxruntime/capi/onnxruntime_pybind11_state.cpython-310-x86_64-linux-gnu.so
 
 COPY . .
