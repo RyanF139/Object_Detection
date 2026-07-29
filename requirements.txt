@@ -1,4 +1,4 @@
-opencv-python==4.10.0.84
+opencv-python==4.8.1.78
 numpy==1.26.4
 requests
 onnxruntime-gpu==1.18.0
