@@ -1,5 +1,5 @@
 opencv-python==4.10.0.84
 numpy<2
 requests
-onnxruntime-gpu==1.18.0
+onnxruntime-gpu==1.17.1
 python-dotenv
