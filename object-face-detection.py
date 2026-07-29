@@ -108,7 +108,7 @@ def _check_opencv_cuda() -> bool:
             backend_id=cv2.dnn.DNN_BACKEND_CUDA,
             target_id=cv2.dnn.DNN_TARGET_CUDA,
         )
-        dummy_img = np.zeros((32, 32, 3), dtype=np.uint8)
+        dummy_img = np.ones((32, 32, 3), dtype=np.uint8) * 128
         dummy_det.setInputSize((32, 32))
         dummy_det.detect(dummy_img)
         del dummy_det
@@ -381,9 +381,13 @@ def build_shared_face_detector():
         score_threshold=SCORE_THRESHOLD, nms_threshold=0.4, top_k=5000,
         backend_id=backend_id, target_id=target_id,
     )
-    dummy = np.zeros((640, 640, 3), dtype=np.uint8)
-    det.setInputSize((640, 640))
-    det.detect(dummy)
+    try:
+        dummy = np.ones((640, 640, 3), dtype=np.uint8) * 128
+        det.setInputSize((640, 640))
+        det.detect(dummy)
+    except Exception as e:
+        print(f"[YUNET SHARED] Peringatan warmup YuNet gagal: {e}")
+        
     print(f"[YUNET SHARED] device={device_label} | model={FACE_MODEL_PATH}")
     return det
 
@@ -416,7 +420,7 @@ def face_inference_worker(worker_id: int):
         backend_id=backend_id, target_id=target_id,
     )
     try:
-        dummy = np.zeros((640, 640, 3), dtype=np.uint8)
+        dummy = np.ones((640, 640, 3), dtype=np.uint8) * 128
         det.setInputSize((640, 640))
         det.detect(dummy)
     except Exception as e:
