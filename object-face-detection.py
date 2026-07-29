@@ -7,7 +7,7 @@ import site
 # ================= FIX WINDOWS CUDA DLLS =================
 if os.name == 'nt':
     try:
-        # Menambahkan path nvidia/* dll agar onnxruntime-gpu mendeteksi CUDA 12
+        # Menambahkan path nvidia/* dll agar onnxruntime-gpu mendeteksi CUDA
         for sp in site.getsitepackages():
             if 'site-packages' in sp:
                 for n_lib in ['cublas', 'cudnn', 'cuda_runtime', 'cufft', 'curand', 'cusolver', 'cusparse']:

@@ -17,7 +17,7 @@ COPY requirements.txt .
 
 RUN pip install --no-cache-dir -r requirements.txt \
     && pip uninstall -y onnxruntime onnxruntime-gpu || true \
-    && pip install --no-cache-dir --force-reinstall onnxruntime-gpu==1.19.0
+    && pip install --no-cache-dir --force-reinstall onnxruntime-gpu==1.16.3
 
 COPY . .
 RUN mkdir -p image_detection/crop image_detection/frame
