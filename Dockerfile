@@ -21,6 +21,8 @@ RUN ln -s /usr/bin/python3 /usr/bin/python || true
 COPY requirements.txt .
 
 # Install requirements (cleaner install using system-level CUDA/cuDNN)
+RUN pip install --no-cache-dir torch==2.4.0 torchvision==0.19.0 --index-url https://download.pytorch.org/whl/cu118
+
 RUN pip install --no-cache-dir -r requirements.txt \
     && pip uninstall -y onnxruntime onnxruntime-gpu numpy || true \
     && rm -rf /usr/local/lib/python3.10/dist-packages/numpy* \
