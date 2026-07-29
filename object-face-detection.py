@@ -4,19 +4,25 @@ import os
 import sys
 import site
 
-# ================= FIX WINDOWS CUDA DLLS =================
-if os.name == 'nt':
-    try:
-        # Menambahkan path nvidia/* dll agar onnxruntime-gpu mendeteksi CUDA
-        for sp in site.getsitepackages():
-            if 'site-packages' in sp:
-                for n_lib in ['cublas', 'cudnn', 'cuda_runtime', 'cufft', 'curand', 'cusolver', 'cusparse']:
-                    bin_path = os.path.join(sp, 'nvidia', n_lib, 'bin')
-                    if os.path.exists(bin_path):
-                        os.add_dll_directory(bin_path)
-                        os.environ['PATH'] = bin_path + os.pathsep + os.environ.get('PATH', '')
-    except Exception as e:
-        pass
+# ================= FIX CUDA DLLS / SO (WINDOWS & LINUX) =================
+try:
+    # Menambahkan path nvidia/* agar onnxruntime-gpu mendeteksi CUDA secara dinamis
+    for sp in site.getsitepackages():
+        if 'site-packages' in sp:
+            nvidia_dir = os.path.join(sp, 'nvidia')
+            if os.path.exists(nvidia_dir):
+                for root, dirs, files in os.walk(nvidia_dir):
+                    if 'lib' in root or 'bin' in root:
+                        # Daftarkan path ke env
+                        os.environ['PATH'] = root + os.pathsep + os.environ.get('PATH', '')
+                        os.environ['LD_LIBRARY_PATH'] = root + os.pathsep + os.environ.get('LD_LIBRARY_PATH', '')
+                        if os.name == 'nt' and 'bin' in root:
+                            try:
+                                os.add_dll_directory(root)
+                            except Exception:
+                                pass
+except Exception as e:
+    pass
 
 import math
 import requests
