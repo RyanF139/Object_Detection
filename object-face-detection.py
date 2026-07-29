@@ -2016,13 +2016,21 @@ def camera_manager():
 
         with camera_lock:
             active_ids  = set(active_cameras.keys())
-            new_ids     = api_ids - active_ids
+            dead_active_ids = {cid for cid, w in active_cameras.items() if w.dead or not w.connected}
+            new_ids     = (api_ids - active_ids) | dead_active_ids
             removed_ids = active_ids - api_ids
 
             for c in cams:
                 cid = c["cctv_id"]
                 if cid in new_ids:
                     try:
+                        if cid in active_cameras:
+                            try:
+                                active_cameras[cid].stop()
+                            except Exception:
+                                pass
+                            del active_cameras[cid]
+
                         w = CameraWorker(
                             cid, c["client_id"], c["stream_url"], c.get("name", "unknown"),
                             roi=c.get("roi"), line=c.get("line"),
@@ -2036,7 +2044,7 @@ def camera_manager():
                         )
                         Thread(target=w.run, daemon=True).start()
                         active_cameras[cid] = w
-                        print(f"[NEW CAMERA] {cid} -> {c.get('name','?')}")
+                        print(f"[NEW/RECONNECTED CAMERA] {cid} -> {c.get('name','?')}")
                     except Exception as e:
                         print(f"[FAILED START] {cid} -> {e}")
                 else:
