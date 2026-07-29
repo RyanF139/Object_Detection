@@ -108,7 +108,7 @@ def _check_opencv_cuda() -> bool:
             backend_id=cv2.dnn.DNN_BACKEND_CUDA,
             target_id=cv2.dnn.DNN_TARGET_CUDA,
         )
-        dummy_img = np.ones((32, 32, 3), dtype=np.uint8) * 128
+        dummy_img = np.full((32, 32, 3), 128, dtype=np.uint8)
         dummy_det.setInputSize((32, 32))
         dummy_det.detect(dummy_img)
         del dummy_det
@@ -295,23 +295,14 @@ _session_lock      = Lock()
 
 def _build_cuda_provider_options() -> dict:
     """Return CUDA EP options yang kompatibel dengan Tesla GPU & Blackwell (RTX 5090).
-    - cudnn_conv_use_max_workspace=0  → cuDNN TIDAK pakai exhaustive algo search (Tesla-safe)
-    - arena_extend_strategy=kSameAsRequested → alokasi VRAM lebih konservatif
-    - gpu_mem_limit=0  → biarkan ORT manage (jangan batasi, Tesla bisa OOM kalau terlalu kecil)
-    - cudnn_conv_algo_search=HEURISTIC  → paksa pencarian algoritma heuristik yang aman untuk Blackwell
+    - Menghapus parameter alokasi memori paksa (arena/workspace) agar tidak memicu misaligned address di arsitektur Pascal (Tesla P4).
     """
-    # Jika berjalan di dalam kontainer Docker, paksa device_id ke 0 
-    # karena isolasi GPU (--gpus device=x) memetakan GPU target ke index 0 secara internal.
     in_docker = os.path.exists('/.dockerenv') or os.environ.get('CONTAINER_NAME') is not None
     dev_id = "0" if in_docker else str(CUDA_DEVICE_ID)
     
     return {
-        "device_id":                      dev_id,
-        "cudnn_conv_use_max_workspace":    "0",   # ← kunci: matikan max-workspace search
-        "do_copy_in_default_stream":       "0",   # ← ubah ke 0 untuk mencegah misaligned address
-        "cudnn_conv_algo_search":          "HEURISTIC",  # HEURISTIC / DEFAULT / EXHAUSTIVE
-        "arena_extend_strategy":           "kSameAsRequested",
-        "enable_cuda_graph":               "0",
+        "device_id": dev_id,
+        "cudnn_conv_algo_search": "DEFAULT",  # Safe and stable fallback
     }
 
 
@@ -387,7 +378,7 @@ def build_shared_face_detector():
         backend_id=backend_id, target_id=target_id,
     )
     try:
-        dummy = np.ones((640, 640, 3), dtype=np.uint8) * 128
+        dummy = np.full((640, 640, 3), 128, dtype=np.uint8)
         det.setInputSize((640, 640))
         det.detect(dummy)
     except Exception as e:
@@ -425,7 +416,7 @@ def face_inference_worker(worker_id: int):
         backend_id=backend_id, target_id=target_id,
     )
     try:
-        dummy = np.ones((640, 640, 3), dtype=np.uint8) * 128
+        dummy = np.full((640, 640, 3), 128, dtype=np.uint8)
         det.setInputSize((640, 640))
         det.detect(dummy)
     except Exception as e:
