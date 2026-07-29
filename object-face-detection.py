@@ -303,7 +303,7 @@ def _build_cuda_provider_options() -> dict:
     return {
         "device_id":                      str(CUDA_DEVICE_ID),
         "cudnn_conv_use_max_workspace":    "0",   # ← kunci: matikan max-workspace search
-        "do_copy_in_default_stream":       "1",
+        "do_copy_in_default_stream":       "0",   # ← ubah ke 0 untuk mencegah misaligned address
         "cudnn_conv_algo_search":          "HEURISTIC",  # HEURISTIC / DEFAULT / EXHAUSTIVE
         "arena_extend_strategy":           "kSameAsRequested",
         "enable_cuda_graph":               "0",
