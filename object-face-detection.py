@@ -294,16 +294,17 @@ _session_lock      = Lock()
 
 
 def _build_cuda_provider_options() -> dict:
-    """Return CUDA EP options yang kompatibel dengan Tesla GPU.
+    """Return CUDA EP options yang kompatibel dengan Tesla GPU & Blackwell (RTX 5090).
     - cudnn_conv_use_max_workspace=0  → cuDNN TIDAK pakai exhaustive algo search (Tesla-safe)
     - arena_extend_strategy=kSameAsRequested → alokasi VRAM lebih konservatif
     - gpu_mem_limit=0  → biarkan ORT manage (jangan batasi, Tesla bisa OOM kalau terlalu kecil)
+    - cudnn_conv_algo_search=HEURISTIC  → paksa pencarian algoritma heuristik yang aman untuk Blackwell
     """
     return {
         "device_id":                      str(CUDA_DEVICE_ID),
         "cudnn_conv_use_max_workspace":    "0",   # ← kunci: matikan max-workspace search
         "do_copy_in_default_stream":       "1",
-        "cudnn_conv_algo_search":          "DEFAULT",  # HEURISTIC / DEFAULT / EXHAUSTIVE
+        "cudnn_conv_algo_search":          "HEURISTIC",  # HEURISTIC / DEFAULT / EXHAUSTIVE
         "arena_extend_strategy":           "kSameAsRequested",
         "enable_cuda_graph":               "0",
     }
