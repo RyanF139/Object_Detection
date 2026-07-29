@@ -782,6 +782,7 @@ def preprocess(img: np.ndarray):
     inp = canvas.astype(np.float32) / 255.0
     inp = np.transpose(inp, (2, 0, 1))
     inp = np.expand_dims(inp, axis=0)
+    inp = np.ascontiguousarray(inp)
     return inp, scale
 
 
