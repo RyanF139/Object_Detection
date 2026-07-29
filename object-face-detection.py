@@ -314,7 +314,13 @@ def build_shared_session():
     opts.intra_op_num_threads     = ONNX_INTRA_THREADS
     opts.inter_op_num_threads     = ONNX_INTER_THREADS
     opts.execution_mode           = ort.ExecutionMode.ORT_SEQUENTIAL
-    opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+    opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_BASIC
+
+    # Nonaktifkan fusi Gelu/FastGelu secara eksplisit untuk mencegah kegagalan alamat CUDA pada Blackwell (RTX 5090)
+    try:
+        opts.add_session_config_entry("session.disable_gelu_fusion", "1")
+    except Exception:
+        pass
 
     use_cuda  = _ORT_USE_CUDA
     providers = (
@@ -395,7 +401,7 @@ print("[STARTUP] YuNet session siap")
 
 # ================= FACE INFERENCE WORKERS =================
 
-_face_infer_queue: Queue = Queue(maxsize=50)
+_face_infer_queue: Queue = Queue(maxsize=15)
 
 
 def face_inference_worker(worker_id: int):
@@ -444,7 +450,7 @@ print(f"[STARTUP] {FACE_INFER_WORKERS} face inference worker(s) started")
 
 # ================= VEHICLE INFERENCE WORKERS =================
 
-_infer_input_queue: Queue = Queue(maxsize=50)
+_infer_input_queue: Queue = Queue(maxsize=15)
 
 
 def inference_worker(worker_id: int):
