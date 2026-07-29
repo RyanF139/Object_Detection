@@ -10,7 +10,7 @@ pipeline {
 
         stage('Checkout') {
             steps {
-                git branch: 'tahanan',
+                git branch: 'dual-gpu',
                     url: "${REPO_URL}",
                     credentialsId: '001'
             }
