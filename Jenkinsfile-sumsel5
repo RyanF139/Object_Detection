@@ -80,25 +80,29 @@ pipeline {
                 sh '''
                 echo "Mendeteksi kapabilitas GPU pada host..."
                 if command -v nvidia-smi > /dev/null 2>&1 && nvidia-smi > /dev/null 2>&1; then
-                    echo "NVIDIA GPU terdeteksi. Meluncurkan kontainer dengan dukungan GPU penuh (--gpus all)..."
-                    docker run -d \\
-                      --name object-detection \\
-                      --gpus all \\
-                      --network host \\
-                      --env-file .env \\
-                      -v /opt/config/object-detection/image_detection:/app/image_detection \\
-                      -v /opt/config/object-detection/image_face:/app/image_face \\
-                      --restart=unless-stopped \\
+                    # Ambil CUDA_DEVICE_ID dari .env (default ke 0 jika tidak ada)
+                    GPU_ID=$(grep -E '^CUDA_DEVICE_ID=' .env | cut -d'=' -f2 | tr -d ' \r\n')
+                    GPU_ID=${GPU_ID:-0}
+                    
+                    echo "NVIDIA GPU terdeteksi. Meluncurkan kontainer pada GPU $GPU_ID (--gpus device=$GPU_ID)..."
+                    docker run -d \
+                      --name object-detection \
+                      --gpus "device=$GPU_ID" \
+                      --network host \
+                      --env-file .env \
+                      -v /opt/config/object-detection/image_detection:/app/image_detection \
+                      -v /opt/config/object-detection/image_face:/app/image_face \
+                      --restart=unless-stopped \
                       object-detection:latest
                 else
                     echo "NVIDIA GPU tidak terdeteksi. Meluncurkan kontainer dalam mode CPU standar..."
-                    docker run -d \\
-                      --name object-detection \\
-                      --network host \\
-                      --env-file .env \\
-                      -v /opt/config/object-detection/image_detection:/app/image_detection \\
-                      -v /opt/config/object-detection/image_face:/app/image_face \\
-                      --restart=unless-stopped \\
+                    docker run -d \
+                      --name object-detection \
+                      --network host \
+                      --env-file .env \
+                      -v /opt/config/object-detection/image_detection:/app/image_detection \
+                      -v /opt/config/object-detection/image_face:/app/image_face \
+                      --restart=unless-stopped \
                       object-detection:latest
                 fi
                 '''
