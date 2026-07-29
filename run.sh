@@ -1,27 +1,18 @@
 #!/bin/bash
 
-# Cari direktori library nvidia secara bersih dan spesifik
-NVIDIA_LIBS=$(python -c "
-import site, os
-paths = []
-for sp in site.getsitepackages():
-    if 'site-packages' in sp:
-        nv_dir = os.path.join(sp, 'nvidia')
-        if os.path.exists(nv_dir):
-            # Hanya ambil folder 'lib' tingkat pertama di bawah sub-package (e.g. nvidia/cudnn/lib)
-            for sub in os.listdir(nv_dir):
-                lib_path = os.path.join(nv_dir, sub, 'lib')
-                if os.path.isdir(lib_path):
-                    paths.append(lib_path)
-print(':'.join(paths))
-")
+# Ambil direktori site-packages utama (indeks ke-0)
+SITE_PACKAGES=$(python -c "import site; print(site.getsitepackages()[0])")
 
-if [ -n "$NVIDIA_LIBS" ]; then
-    export LD_LIBRARY_PATH="$NVIDIA_LIBS:$LD_LIBRARY_PATH"
-    echo "[LAUNCHER] LD_LIBRARY_PATH diset bersih ke: $LD_LIBRARY_PATH"
-else
-    echo "[LAUNCHER] Peringatan: Library pip nvidia tidak ditemukan."
-fi
+# Set LD_LIBRARY_PATH secara eksplisit ke masing-masing folder lib NVIDIA
+export LD_LIBRARY_PATH=$SITE_PACKAGES/nvidia/cublas/lib:$LD_LIBRARY_PATH
+export LD_LIBRARY_PATH=$SITE_PACKAGES/nvidia/cudnn/lib:$LD_LIBRARY_PATH
+export LD_LIBRARY_PATH=$SITE_PACKAGES/nvidia/cuda_runtime/lib:$LD_LIBRARY_PATH
+export LD_LIBRARY_PATH=$SITE_PACKAGES/nvidia/cufft/lib:$LD_LIBRARY_PATH
+export LD_LIBRARY_PATH=$SITE_PACKAGES/nvidia/curand/lib:$LD_LIBRARY_PATH
+export LD_LIBRARY_PATH=$SITE_PACKAGES/nvidia/cusolver/lib:$LD_LIBRARY_PATH
+export LD_LIBRARY_PATH=$SITE_PACKAGES/nvidia/cusparse/lib:$LD_LIBRARY_PATH
+
+echo "[LAUNCHER] LD_LIBRARY_PATH configured: $LD_LIBRARY_PATH"
 
 # Jalankan aplikasi Python utama
 exec python -u object-face-detection.py
