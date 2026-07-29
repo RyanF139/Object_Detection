@@ -289,6 +289,22 @@ _shared_input_name = None
 _session_lock      = Lock()
 
 
+def _build_cuda_provider_options() -> dict:
+    """Return CUDA EP options yang kompatibel dengan Tesla GPU.
+    - cudnn_conv_use_max_workspace=0  → cuDNN TIDAK pakai exhaustive algo search (Tesla-safe)
+    - arena_extend_strategy=kSameAsRequested → alokasi VRAM lebih konservatif
+    - gpu_mem_limit=0  → biarkan ORT manage (jangan batasi, Tesla bisa OOM kalau terlalu kecil)
+    """
+    return {
+        "device_id":                      str(CUDA_DEVICE_ID),
+        "cudnn_conv_use_max_workspace":    "0",   # ← kunci: matikan max-workspace search
+        "do_copy_in_default_stream":       "1",
+        "cudnn_conv_algo_search":          "DEFAULT",  # HEURISTIC / DEFAULT / EXHAUSTIVE
+        "arena_extend_strategy":           "kSameAsRequested",
+        "enable_cuda_graph":               "0",
+    }
+
+
 def build_shared_session():
     opts = ort.SessionOptions()
     opts.intra_op_num_threads     = ONNX_INTRA_THREADS
@@ -296,16 +312,30 @@ def build_shared_session():
     opts.execution_mode           = ort.ExecutionMode.ORT_SEQUENTIAL
     opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
 
+    use_cuda  = _ORT_USE_CUDA
     providers = (
-        [("CUDAExecutionProvider", {"device_id": CUDA_DEVICE_ID}), "CPUExecutionProvider"]
-        if _ORT_USE_CUDA else ["CPUExecutionProvider"]
+        [("CUDAExecutionProvider", _build_cuda_provider_options()), "CPUExecutionProvider"]
+        if use_cuda else ["CPUExecutionProvider"]
     )
 
     sess       = ort.InferenceSession(MODEL_PATH, providers=providers, sess_options=opts)
     input_name = sess.get_inputs()[0].name
 
     dummy = np.zeros((1, 3, IMG_SIZE, IMG_SIZE), dtype=np.float32)
-    sess.run(None, {input_name: dummy})
+
+    # --- warm-up run: fallback ke CPU jika CUDA gagal (CUDNN_STATUS_EXECUTION_FAILED_CUDART) ---
+    if use_cuda:
+        try:
+            sess.run(None, {input_name: dummy})
+        except Exception as cuda_err:
+            print(f"[ONNX SHARED] CUDA warm-up GAGAL: {cuda_err}")
+            print("[ONNX SHARED] Fallback ke CPUExecutionProvider...")
+            sess       = ort.InferenceSession(MODEL_PATH, providers=["CPUExecutionProvider"], sess_options=opts)
+            input_name = sess.get_inputs()[0].name
+            sess.run(None, {input_name: dummy})
+            print("[ONNX SHARED] CPU fallback warm-up OK")
+    else:
+        sess.run(None, {input_name: dummy})
 
     print(f"[ONNX SHARED] provider={sess.get_providers()[0]} | device_id={CUDA_DEVICE_ID}")
     print(f"[ONNX SHARED] intra={ONNX_INTRA_THREADS} | inter={ONNX_INTER_THREADS}")
