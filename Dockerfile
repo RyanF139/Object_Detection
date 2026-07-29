@@ -22,8 +22,9 @@ COPY requirements.txt .
 
 # Install requirements (cleaner install using system-level CUDA/cuDNN)
 RUN pip install --no-cache-dir -r requirements.txt \
-    && pip uninstall -y onnxruntime onnxruntime-gpu || true \
+    && pip uninstall -y onnxruntime onnxruntime-gpu numpy || true \
     && pip install --no-cache-dir --force-reinstall onnxruntime-gpu==1.18.0 \
+    && pip install --no-cache-dir --ignore-installed --force-reinstall numpy==1.26.4 \
     && patchelf --clear-execstack /usr/local/lib/python3.10/dist-packages/onnxruntime/capi/onnxruntime_pybind11_state.cpython-310-x86_64-linux-gnu.so || true \
     && patchelf --clear-execstack /usr/lib/python3/dist-packages/onnxruntime/capi/onnxruntime_pybind11_state.cpython-310-x86_64-linux-gnu.so || true
 
