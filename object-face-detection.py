@@ -300,8 +300,13 @@ def _build_cuda_provider_options() -> dict:
     - gpu_mem_limit=0  → biarkan ORT manage (jangan batasi, Tesla bisa OOM kalau terlalu kecil)
     - cudnn_conv_algo_search=HEURISTIC  → paksa pencarian algoritma heuristik yang aman untuk Blackwell
     """
+    # Jika berjalan di dalam kontainer Docker, paksa device_id ke 0 
+    # karena isolasi GPU (--gpus device=x) memetakan GPU target ke index 0 secara internal.
+    in_docker = os.path.exists('/.dockerenv') or os.environ.get('CONTAINER_NAME') is not None
+    dev_id = "0" if in_docker else str(CUDA_DEVICE_ID)
+    
     return {
-        "device_id":                      str(CUDA_DEVICE_ID),
+        "device_id":                      dev_id,
         "cudnn_conv_use_max_workspace":    "0",   # ← kunci: matikan max-workspace search
         "do_copy_in_default_stream":       "0",   # ← ubah ke 0 untuk mencegah misaligned address
         "cudnn_conv_algo_search":          "HEURISTIC",  # HEURISTIC / DEFAULT / EXHAUSTIVE
