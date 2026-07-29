@@ -1,31 +1,34 @@
-FROM python:3.10-slim
+FROM nvidia/cuda:11.8.0-cudnn8-runtime-ubuntu22.04
 
 WORKDIR /app
 
 ENV PYTHONUNBUFFERED=1
 ENV CONTAINER_NAME=object-detection-onnx
 
-RUN apt-get update && apt-get install -y wget gnupg2 \
-    && wget https://developer.download.nvidia.com/compute/cuda/repos/debian11/x86_64/cuda-keyring_1.1-1_all.deb \
-    && dpkg -i cuda-keyring_1.1-1_all.deb \
-    && apt-get update && apt-get install -y \
+# Install Python and basic system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3.10 \
+    python3-pip \
     libgl1 \
     libglib2.0-0 \
-    build-essential \
     ffmpeg \
     patchelf \
-    libcudnn8=8.9.7.29-1+cuda11.8 \
-    && rm -rf /var/lib/apt/lists/* cuda-keyring_1.1-1_all.deb
+    && rm -rf /var/lib/apt/lists/*
+
+# Map python to python3
+RUN ln -s /usr/bin/python3 /usr/bin/python || true
 
 COPY requirements.txt .
 
+# Install requirements (cleaner install using system-level CUDA/cuDNN)
 RUN pip install --no-cache-dir -r requirements.txt \
     && pip uninstall -y onnxruntime onnxruntime-gpu || true \
     && pip install --no-cache-dir --force-reinstall onnxruntime-gpu==1.18.0 \
-    && pip install --no-cache-dir --force-reinstall numpy==1.26.4 \
-    && patchelf --clear-execstack /usr/local/lib/python3.10/site-packages/onnxruntime/capi/onnxruntime_pybind11_state.cpython-310-x86_64-linux-gnu.so
+    && patchelf --clear-execstack /usr/local/lib/python3.10/dist-packages/onnxruntime/capi/onnxruntime_pybind11_state.cpython-310-x86_64-linux-gnu.so || true \
+    && patchelf --clear-execstack /usr/lib/python3/dist-packages/onnxruntime/capi/onnxruntime_pybind11_state.cpython-310-x86_64-linux-gnu.so || true
 
 COPY . .
 RUN mkdir -p image_detection/crop image_detection/frame && chmod +x run.sh
 
-CMD ["./run.sh"]
+# Directly run python (NVIDIA runtime exposes CUDA naturally)
+CMD ["python", "-u", "object-face-detection.py"]
