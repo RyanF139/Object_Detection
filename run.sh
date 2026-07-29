@@ -1,28 +1,25 @@
 #!/bin/bash
 
-set -e
+# Cari direktori library nvidia di python site-packages secara otomatis
+NVIDIA_LIBS=$(python -c "
+import site, os
+paths = []
+for sp in site.getsitepackages():
+    if 'site-packages' in sp:
+        nv_dir = os.path.join(sp, 'nvidia')
+        if os.path.exists(nv_dir):
+            for root, dirs, files in os.walk(nv_dir):
+                if 'lib' in root:
+                    paths.append(root)
+print(':'.join(paths))
+")
 
-APP_DIR=$(pwd)
+if [ -n "$NVIDIA_LIBS" ]; then
+    export LD_LIBRARY_PATH="$NVIDIA_LIBS:$LD_LIBRARY_PATH"
+    echo "[LAUNCHER] LD_LIBRARY_PATH berhasil diset ke: $LD_LIBRARY_PATH"
+else
+    echo "[LAUNCHER] Peringatan: Library pip nvidia tidak ditemukan."
+fi
 
-# ==============================================================================
-# FIX CUDA / ONNX GPU / WSL
-# ==============================================================================
-
-# Ambil lokasi site-packages dari python environment saat ini
-SITE_PACKAGES=$(python3 -c "import site; print(site.getsitepackages()[0])")
-
-export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$SITE_PACKAGES/nvidia/cublas/lib
-export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$SITE_PACKAGES/nvidia/cudnn/lib
-export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$SITE_PACKAGES/nvidia/cuda_runtime/lib
-export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$SITE_PACKAGES/nvidia/cufft/lib
-export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$SITE_PACKAGES/nvidia/curand/lib
-export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$SITE_PACKAGES/nvidia/cusolver/lib
-export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$SITE_PACKAGES/nvidia/cusparse/lib
-
-echo "[INFO] LD_LIBRARY_PATH configured for CUDA."
-
-# ==============================================================================
-# RUN PYTHON SCRIPT
-# ==============================================================================
-
-exec python3 object-face-detection.py
+# Jalankan aplikasi Python utama
+exec python -u object-face-detection.py

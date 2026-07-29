@@ -4,25 +4,23 @@ import os
 import sys
 import site
 
-# ================= FIX CUDA DLLS / SO (WINDOWS & LINUX) =================
-try:
-    # Menambahkan path nvidia/* agar onnxruntime-gpu mendeteksi CUDA secara dinamis
-    for sp in site.getsitepackages():
-        if 'site-packages' in sp:
-            nvidia_dir = os.path.join(sp, 'nvidia')
-            if os.path.exists(nvidia_dir):
-                for root, dirs, files in os.walk(nvidia_dir):
-                    if 'lib' in root or 'bin' in root:
-                        # Daftarkan path ke env
-                        os.environ['PATH'] = root + os.pathsep + os.environ.get('PATH', '')
-                        os.environ['LD_LIBRARY_PATH'] = root + os.pathsep + os.environ.get('LD_LIBRARY_PATH', '')
-                        if os.name == 'nt' and 'bin' in root:
+# ================= FIX WINDOWS CUDA DLLS =================
+if os.name == 'nt':
+    try:
+        # Menambahkan path nvidia/* dll agar onnxruntime-gpu mendeteksi CUDA 11/12 di Windows
+        for sp in site.getsitepackages():
+            if 'site-packages' in sp:
+                nvidia_dir = os.path.join(sp, 'nvidia')
+                if os.path.exists(nvidia_dir):
+                    for root, dirs, files in os.walk(nvidia_dir):
+                        if 'bin' in root:
                             try:
                                 os.add_dll_directory(root)
+                                os.environ['PATH'] = root + os.pathsep + os.environ.get('PATH', '')
                             except Exception:
                                 pass
-except Exception as e:
-    pass
+    except Exception as e:
+        pass
 
 import math
 import requests
