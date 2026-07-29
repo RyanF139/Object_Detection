@@ -64,6 +64,13 @@ os.environ["OPENCV_LOG_LEVEL"] = "SILENT"   # suppress FFmpeg decode error log
 # ================= CUDA CHECK =================
 
 def _check_onnxruntime_cuda() -> bool:
+    import subprocess
+    try:
+        subprocess.run(["nvidia-smi"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+    except Exception:
+        print("[CUDA CHECK] onnxruntime: Tidak ada physical GPU / driver NVIDIA terdeteksi")
+        return False
+
     if "CUDAExecutionProvider" not in ort.get_available_providers():
         print("[CUDA CHECK] onnxruntime: CUDAExecutionProvider tidak tersedia")
         return False
