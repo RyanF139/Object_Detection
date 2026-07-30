@@ -14,10 +14,9 @@ export LD_LIBRARY_PATH=$SITE_PACKAGES/nvidia/cusparse/lib:$LD_LIBRARY_PATH
 
 echo "[LAUNCHER] LD_LIBRARY_PATH configured: $LD_LIBRARY_PATH"
 
-# Redirect semua output (stdout & stderr) ke awk untuk difilter
-exec > >(awk '
+# Gunakan pipe langsung untuk filter log agar tidak ada isu buffer/PID di Docker
+python -u object-face-detection.py 2>&1 | awk '
 {
-    # Tangkap pesan error H264 (tanpa tanda kurung siku awal untuk menghindari gagal match karena kode warna ANSI)
     if ($0 ~ /h264 @ |NULL @ |illegal POC type|error while decoding MB|cabac decode/) {
         lines[count % 1000] = $0
         count++
@@ -35,9 +34,6 @@ exec > >(awk '
         print $0
     }
     fflush()
-}') 2>&1
+}'
 
-
-# Jalankan aplikasi Python utama
-exec python -u object-face-detection.py
 
