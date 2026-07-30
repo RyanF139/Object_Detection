@@ -34,5 +34,5 @@ RUN pip install --no-cache-dir -r requirements.txt \
 COPY . .
 RUN mkdir -p image_detection/crop image_detection/frame && chmod +x run.sh
 
-# Directly run python (NVIDIA runtime exposes CUDA naturally)
-CMD ["python", "-u", "object-face-detection.py"]
+# Execute the wrapper script which handles library paths and filters ffmpeg logs
+CMD ["./run.sh"]
