@@ -19,17 +19,24 @@ exec > >(awk '
 {
     # Tangkap pesan error H264 (tanpa tanda kurung siku awal untuk menghindari gagal match karena kode warna ANSI)
     if ($0 ~ /h264 @ |NULL @ |illegal POC type|error while decoding MB|cabac decode/) {
-        print $0 >> "log_h264.txt"
+        lines[count % 1000] = $0
         count++
-        if (count >= 100) {
-            system("tail -n 1000 log_h264.txt > log_h264_tmp.txt && mv log_h264_tmp.txt log_h264.txt")
-            count = 0
+        if (count % 100 == 0) {
+            file = "log_h264.txt"
+            printf "" > file
+            len = (count > 1000) ? 1000 : count
+            start = (count > 1000) ? (count % 1000) : 0
+            for (i = 0; i < len; i++) {
+                print lines[(start + i) % 1000] >> file
+            }
+            close(file)
         }
     } else {
         print $0
     }
     fflush()
 }') 2>&1
+
 
 # Jalankan aplikasi Python utama
 exec python -u object-face-detection.py
