@@ -14,10 +14,11 @@ export LD_LIBRARY_PATH=$SITE_PACKAGES/nvidia/cusparse/lib:$LD_LIBRARY_PATH
 
 echo "[LAUNCHER] LD_LIBRARY_PATH configured: $LD_LIBRARY_PATH"
 
-# Jalankan aplikasi Python utama, filter log error H264 ke log_h264.txt (maks 1000 baris)
-exec python -u object-face-detection.py 2> >(awk '
+# Redirect semua output (stdout & stderr) ke awk untuk difilter
+exec > >(awk '
 {
-    if ($0 ~ /\[h264 @ |illegal POC type|error while decoding MB|cabac decode/) {
+    # Tangkap pesan error H264 (tanpa tanda kurung siku awal untuk menghindari gagal match karena kode warna ANSI)
+    if ($0 ~ /h264 @ |NULL @ |illegal POC type|error while decoding MB|cabac decode/) {
         print $0 >> "log_h264.txt"
         count++
         if (count >= 100) {
@@ -25,7 +26,11 @@ exec python -u object-face-detection.py 2> >(awk '
             count = 0
         }
     } else {
-        print $0 > "/dev/stderr"
+        print $0
     }
-    fflush("/dev/stderr")
-}')
+    fflush()
+}') 2>&1
+
+# Jalankan aplikasi Python utama
+exec python -u object-face-detection.py
+
