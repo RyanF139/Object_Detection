@@ -56,6 +56,7 @@ CUDA_DEVICE_ID = int(os.getenv("CUDA_DEVICE_ID", 0))
 # nobuffer              → kurangi latency, tidak tumpuk frame di buffer
 # low_delay             → prioritaskan frame terbaru
 os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = (
+    "video_codec;h264_cuvid|"
     "rtsp_transport;tcp|"
     "fflags;nobuffer+discardcorrupt|"
     "flags;low_delay|"
