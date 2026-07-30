@@ -435,7 +435,8 @@ def face_inference_worker(worker_id: int):
         try:
             h, w = frame_resized.shape[:2]
             det.setInputSize((w, h))
-            _, faces = det.detect(frame_resized)
+            with _gpu_infer_lock:
+                _, faces = det.detect(frame_resized)
             result_q.put(("ok", faces, inv_scale))
         except Exception as e:
             result_q.put(("err", None, 1.0))
@@ -454,6 +455,8 @@ print(f"[STARTUP] {FACE_INFER_WORKERS} face inference worker(s) started")
 _infer_input_queue: Queue = Queue(maxsize=15)
 
 
+_gpu_infer_lock = Lock()
+
 def inference_worker(worker_id: int):
     sess, input_name = get_shared_session()
     print(f"[INFER WORKER {worker_id}] Started | provider={sess.get_providers()[0]}")
@@ -467,7 +470,8 @@ def inference_worker(worker_id: int):
         cid, frame_infer, result_q = item
         try:
             inp, scale = preprocess(frame_infer)
-            outputs    = sess.run(None, {input_name: inp})
+            with _gpu_infer_lock:
+                outputs = sess.run(None, {input_name: inp})
             h, w       = frame_infer.shape[:2]
             results    = postprocess(outputs, scale, w, h)
             result_q.put(("ok", results))
