@@ -56,7 +56,6 @@ CUDA_DEVICE_ID = int(os.getenv("CUDA_DEVICE_ID", 0))
 # nobuffer              → kurangi latency, tidak tumpuk frame di buffer
 # low_delay             → prioritaskan frame terbaru
 os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = (
-    "video_codec;h264_cuvid|"
     "rtsp_transport;tcp|"
     "fflags;nobuffer+discardcorrupt|"
     "flags;low_delay|"
@@ -1139,6 +1138,11 @@ class CameraWorker:
         self._roi_send_times = {}   # cooldown per ROI index, level kamera (tidak hilang saat obj_id berganti)
 
         self.cap = self._open_capture()
+        
+        self.latest_frame = None
+        self.latest_ret = False
+        self.capture_thread = Thread(target=self._capture_loop, daemon=True)
+        self.capture_thread.start()
 
         print(f"[CAMERA START] {cid} -> {name} | vehicle={self.vehicle_enabled} | face={self.face_enabled} | person={self.person_enabled}")
 
@@ -1279,25 +1283,32 @@ class CameraWorker:
 
     # ------------------------------------------------------------------ frame read
 
+    def _capture_loop(self):
+        while self.running:
+            if not self.connected or self.reconnecting or self.cap is None:
+                time.sleep(0.01)
+                continue
+            
+            try:
+                ret, frame = self.cap.read()
+                if ret:
+                    self.latest_ret = True
+                    self.latest_frame = frame
+                else:
+                    self.latest_ret = False
+                    time.sleep(0.01)
+            except Exception:
+                self.latest_ret = False
+                time.sleep(0.01)
+
     def _read_latest_frame(self):
         """
-        Ambil frame terbaru dari buffer kamera.
-        Grab beberapa frame dulu untuk flush buffer lama,
-        lalu retrieve hanya yang terakhir.
-        Ini mencegah pemrosesan frame stale & mengurangi CPU decode sia-sia.
+        Ambil frame terbaru dari buffer memory yang di-update oleh thread terpisah.
         """
-        grabbed = 0
-        for _ in range(GRAB_SKIP_COUNT):
-            if not self.cap.grab():
-                break
-            grabbed += 1
-
-        if grabbed == 0:
-            # Tidak bisa grab sama sekali → stream mati
+        if not self.latest_ret or self.latest_frame is None:
             return False, None
-
-        ret, frame = self.cap.retrieve()
-        return ret, frame
+        # Copy the frame so the capture thread doesn't overwrite it while we're using it
+        return True, self.latest_frame.copy()
 
     # ------------------------------------------------------------------ vehicle inference
 
@@ -1940,11 +1951,13 @@ class CameraWorker:
     def _reconnect(self):
         print(f"[RECONNECT] {self.cid} -> {self.name_camera}")
         self.reconnecting = True
-        self.cap.release()
+        if self.cap is not None:
+            self.cap.release()
         time.sleep(2)
         self.cap = self._open_capture()
         self.bad     = 0
         self.tracker = ObjectTracker()
+        self.reconnecting = False
         print(f"[TRACKER RESET] {self.cid}")
 
 

@@ -2,3 +2,4 @@ numpy<2
 requests
 onnxruntime-gpu==1.17.1
 python-dotenv
+opencv-python

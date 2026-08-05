@@ -1213,7 +1213,7 @@ def load_cameras():
     else:
         print("[PRODUCTION MODE] Load kamera dari API")
         try:
-            r    = requests.get(f"{ENDPOINT_URL}?service_id={SERVICE_ID}", timeout=10)
+            r    = requests.get(f"{ENDPOINT_URL}?service_id={SERVICE_ID}&internal=true", timeout=10)
             data = r.json()["data"]
             print(f"[API] Total kamera: {len(data)}")
             return data
