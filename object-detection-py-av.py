@@ -1,5 +1,6 @@
 import cv2
 import time
+import av
 import os
 import sys
 import site
@@ -52,10 +53,6 @@ _DEVICE_ENV    = os.getenv("DEVICE", "cuda").lower()
 CUDA_DEVICE_ID = int(os.getenv("CUDA_DEVICE_ID", 0))
 
 # ================= RTSP OPTIONS =================
-# fflags=discardcorrupt → buang frame corrupt SEBELUM di-decode (hemat CPU)
-# nobuffer              → kurangi latency, tidak tumpuk frame di buffer
-# low_delay             → prioritaskan frame terbaru
-os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp"
 os.environ["OPENCV_LOG_LEVEL"] = "SILENT"   # suppress FFmpeg decode error log
 
 
@@ -1153,17 +1150,26 @@ class CameraWorker:
             return url
         return f"rtsp://{url}"
 
-    def _open_capture(self) -> cv2.VideoCapture:
-        cap = cv2.VideoCapture(self.stream_source, cv2.CAP_FFMPEG)
-        cap.set(cv2.CAP_PROP_FPS, FRAME_FPS)  # hint FPS ke decoder
-        if cap.isOpened():
+    def _open_capture(self):
+        try:
+            # options untuk av.open
+            options = {
+                'rtsp_transport': 'tcp',
+                'stimeout': '5000000',      # 5 seconds socket timeout
+                'max_delay': '500000',
+                'flags': 'low_delay'
+            }
+            container = av.open(self.stream_source, options=options)
+            container.streams.video[0].thread_type = "AUTO"  # Multi-thread H264 decode
             self.connected = True
             self.dead      = False
-            print(f"[RTSP CONNECTED] {self.cid} -> {self.name_camera}")
-        else:
+            print(f"[RTSP CONNECTED PyAV] {self.cid} -> {self.name_camera}")
+            return container
+        except Exception as e:
+            print(f"[RTSP FAILED PyAV] {self.cid} -> {self.name_camera} ({e})")
+            self.connected = False
             self.dead = True
-            print(f"[RTSP FAILED] {self.cid} -> {self.name_camera}")
-        return cap
+            return None
 
     # ------------------------------------------------------------------ config
 
@@ -1283,25 +1289,42 @@ class CameraWorker:
                 continue
             
             try:
-                ret, frame = self.cap.read()
-                if ret:
+                video_stream = self.cap.streams.video[0]
+                for frame in self.cap.decode(video_stream):
+                    if not self.running or self.reconnecting:
+                        break
+                    
+                    # Simpan frame mentah (PyAV frame), hindari konversi warna 
+                    # di thread ini agar CPU tidak 100% saat pakai 16 kamera.
+                    self.latest_av_frame = frame
                     self.latest_ret = True
-                    self.latest_frame = frame
-                else:
+                
+                # Jika keluar dari loop tapi masih running, stream terputus
+                if self.running and not self.reconnecting:
                     self.latest_ret = False
-                    time.sleep(0.01)
-            except Exception:
+                    self.connected = False
+                    time.sleep(0.1)
+
+            except Exception as e:
+                print(f"[_capture_loop ERROR] {self.cid}: {e}")
                 self.latest_ret = False
-                time.sleep(0.01)
+                self.connected = False
+                time.sleep(0.5)
 
     def _read_latest_frame(self):
         """
         Ambil frame terbaru dari buffer memory yang di-update oleh thread terpisah.
+        Melakukan konversi ke Numpy (BGR) HANYA saat diminta, sehingga frame 
+        yang ter-skip tidak membebani CPU sama sekali.
         """
-        if not self.latest_ret or self.latest_frame is None:
+        if not getattr(self, 'latest_ret', False) or getattr(self, 'latest_av_frame', None) is None:
             return False, None
-        # Copy the frame so the capture thread doesn't overwrite it while we're using it
-        return True, self.latest_frame.copy()
+            
+        try:
+            img = self.latest_av_frame.to_ndarray(format='bgr24')
+            return True, img
+        except Exception:
+            return False, None
 
     # ------------------------------------------------------------------ vehicle inference
 
@@ -1945,7 +1968,10 @@ class CameraWorker:
         print(f"[RECONNECT] {self.cid} -> {self.name_camera}")
         self.reconnecting = True
         if self.cap is not None:
-            self.cap.release()
+            try:
+                self.cap.close()
+            except Exception:
+                pass
         time.sleep(2)
         self.cap = self._open_capture()
         self.bad     = 0

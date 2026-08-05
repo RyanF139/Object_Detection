@@ -15,4 +15,4 @@ export LD_LIBRARY_PATH=$SITE_PACKAGES/nvidia/cusparse/lib:$LD_LIBRARY_PATH
 echo "[LAUNCHER] LD_LIBRARY_PATH configured: $LD_LIBRARY_PATH"
 
 # Jalankan aplikasi Python utama
-exec python -u object-face-detection.py
+exec python -u object-detection-py-av.py
