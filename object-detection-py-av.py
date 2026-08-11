@@ -516,11 +516,21 @@ def is_just_crossed_line(history, line_pts, line_in_dir, margin=10.0):
     if len(history) < 2:
         return None
     (lx1, ly1), (lx2, ly2) = line_pts
-    px_prev, py_prev = history[-2]
     px_curr, py_curr = history[-1]
-
-    prev_dist = line_dist_px(px_prev, py_prev, lx1, ly1, lx2, ly2)
     curr_dist = line_dist_px(px_curr, py_curr, lx1, ly1, lx2, ly2)
+
+    if abs(curr_dist) <= margin:
+        return None
+
+    prev_dist = None
+    for px, py in reversed(history[:-1]):
+        d = line_dist_px(px, py, lx1, ly1, lx2, ly2)
+        if abs(d) > margin:
+            prev_dist = d
+            break
+
+    if prev_dist is None:
+        return None
 
     # Wajib melintasi zona mati (deadband) secara bersih dari > margin ke < -margin
     crossed_a_to_b = (prev_dist > margin and curr_dist < -margin)
@@ -1397,7 +1407,7 @@ class CameraWorker:
                 track_data["line_crossed_first"] = True
 
         # 1. Simpan/perbarui cache capture saat kendaraan berada di posisi TERDALAM di ROI (hanya jika ROI dikunjungi sebelum Line)
-        dist_roi = cv2.pointPolygonTest(roi_scaled, (float(cx), float(cy)), True)
+        dist_roi = cv2.pointPolygonTest(roi_scaled, (float(cx), float(y2)), True)
         if dist_roi >= 0:
             if not track_data.get("line_crossed_first", False):
                 track_data["roi_visited"] = True
